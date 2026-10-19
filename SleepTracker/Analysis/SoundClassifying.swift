@@ -2,7 +2,8 @@ import AVFoundation
 
 /// Receives the results of a `SoundClassifying`. Every method is called
 /// synchronously on the thread that called `analyze(_:atFramePosition:)` or
-/// `completeAnalysis()`, which is the pipeline's serial analysis queue.
+/// `completeAnalysis()`, which is the pipeline's serial analysis queue (for the
+/// real service assumed; see docs/unverified.md).
 protocol SoundClassifierDelegate: AnyObject {
     /// One analysis window. `window` times are seconds since session start;
     /// `topLabels` are the highest-ranked raw labels (at most five, confidence
@@ -19,7 +20,8 @@ protocol SoundClassifying: AnyObject {
     /// within the current segment.
     func analyze(_ buffer: AVAudioPCMBuffer, atFramePosition position: AVAudioFramePosition)
     /// Ends the segment. No buffers may follow. Final results, if any, are delivered
-    /// to the delegate on the calling thread.
+    /// to the delegate on the calling thread (for the real service assumed; see
+    /// docs/unverified.md).
     func completeAnalysis()
 }
 

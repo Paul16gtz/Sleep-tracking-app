@@ -27,8 +27,9 @@ final class FakeSoundClassifier: SoundClassifying {
     // MARK: - Test helpers
 
     /// Delivers one classification window to the delegate, synchronously on the
-    /// calling thread (the real service also calls its delegate on the thread that
-    /// drives the analysis). Call it from the pipeline's queue.
+    /// calling thread. The real service is assumed to call its delegate on the thread
+    /// that drives the analysis as well (see docs/unverified.md). Call it from the
+    /// pipeline's queue.
     func emit(window: ClassificationWindow, topLabels: [RankedLabel] = []) {
         delegate?.classifier(self, didProduce: window, topLabels: topLabels)
     }

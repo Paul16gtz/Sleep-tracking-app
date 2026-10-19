@@ -9,8 +9,9 @@ import SoundAnalysis
 ///
 /// Threading: `analyze` and `completeAnalysis` are called from the pipeline's serial
 /// analysis queue only. SoundAnalysis calls the `SNResultsObserving` methods
-/// synchronously on the thread that calls `analyze` / `completeAnalysis`, so the
-/// delegate is called on that queue as well. Nothing is dispatched elsewhere.
+/// synchronously on the thread that calls `analyze` / `completeAnalysis` (assumed;
+/// see docs/unverified.md), so the delegate is called on that queue as well.
+/// Nothing is dispatched elsewhere.
 final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObserving {
     /// Preferred analysis window in seconds.
     static let windowDuration: TimeInterval = 1.5
@@ -28,14 +29,21 @@ final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObservi
     private let classifyRequest: SNClassifySoundRequest
     private let analyzer: SNAudioStreamAnalyzer
 
+    /// The window duration in seconds that SoundAnalysis actually uses, for the
+    /// Debug screen (normally `windowDuration`).
+    var effectiveWindowDuration: TimeInterval {
+        classifyRequest.windowDuration.seconds
+    }
+
     /// `format` is the format of every buffer passed to `analyze` (mono Float32 at
     /// the native sample rate). Throws when the built-in classifier is unavailable
     /// or the analyzer rejects the request.
     init(format: AVAudioFormat, mapping: LabelMapping, timeOffset: TimeInterval) throws {
         let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
         // Assigning a duration that `windowDurationConstraint` does not allow is not
-        // reported as a Swift error (no do/catch possible), so the preferred 1.5 s is
-        // moved to the closest allowed value first.
+        // reported as a Swift error (no do/catch possible). If the constraint lists
+        // discrete durations, the one closest to 1.5 s is used; otherwise 1.5 s is set
+        // directly.
         let preferred = CMTime(seconds: SoundClassifierService.windowDuration, preferredTimescale: 48_000)
         request.windowDuration = SoundClassifierService.allowedWindowDuration(
             closestTo: preferred,
@@ -63,23 +71,16 @@ final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObservi
         }
     }
 
-    /// The window duration allowed by `constraint` that is closest to `preferred`:
-    /// the nearest enumerated duration, or `preferred` clamped to the range.
+    /// The enumerated duration closest to `preferred` when `constraint` lists discrete
+    /// durations; otherwise `preferred` itself (`.version1` is expected to allow a
+    /// range of about 0.5-15 s, which contains 1.5 s; assumed, see docs/unverified.md).
     static func allowedWindowDuration(closestTo preferred: CMTime, constraint: SNTimeDurationConstraint) -> CMTime {
+        guard case .enumeratedDurations(let durations) = constraint else {
+            return preferred
+        }
         let target = preferred.seconds
-        if case .enumeratedDurations(let durations) = constraint {
-            let closest = durations.min { abs($0.seconds - target) < abs($1.seconds - target) }
-            return closest ?? preferred
-        }
-        if case .durationRange(let range) = constraint {
-            if target < range.lowerBound.seconds {
-                return range.lowerBound
-            }
-            if target > range.upperBound.seconds {
-                return range.upperBound
-            }
-        }
-        return preferred
+        let closest = durations.min { abs($0.seconds - target) < abs($1.seconds - target) }
+        return closest ?? preferred
     }
 
     // MARK: - SoundClassifying
@@ -94,7 +95,8 @@ final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObservi
 
     // MARK: - SNResultsObserving
 
-    /// Runs synchronously inside `analyze` / `completeAnalysis` on the analysis queue.
+    /// Runs synchronously inside `analyze` / `completeAnalysis` on the analysis queue
+    /// (assumed; see docs/unverified.md).
     func request(_ request: SNRequest, didProduce result: SNResult) {
         guard let result = result as? SNClassificationResult else { return }
         let start = timeOffset + result.timeRange.start.seconds
