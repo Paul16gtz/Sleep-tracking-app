@@ -1,4 +1,5 @@
 import AVFoundation
+import UIKit
 
 enum MicrophoneError: LocalizedError {
     /// The input node reports no usable format (session not active or no microphone permission).
@@ -27,12 +28,17 @@ enum MicrophoneError: LocalizedError {
 /// segment, so a buffer still in flight when a segment is torn down is dropped
 /// instead of being counted in the next segment (which may run at another sample rate).
 ///
-/// Restart: on an interruption, a relevant route change, a media services reset or an
-/// engine configuration change, the interruption is reported once, the engine is torn
-/// down, the session is reconfigured and a new segment begins. A failed restart is
-/// retried after 1, 2, 5, 10 and 30 s; when the last retry fails, `didFailWith` reports
-/// `MicrophoneError.restartFailed`. The observers stay registered, so a later
-/// notification can still bring capture back.
+/// Restart: at the end of an interruption (with or without `.shouldResume`), on a
+/// relevant route change, a media services reset or an engine configuration change, the
+/// interruption is reported once, the engine is torn down, the session is reconfigured
+/// and a new segment begins. A failed restart is retried after 1, 2, 5, 10 and 30 s;
+/// when the last retry fails, `didFailWith` reports `MicrophoneError.restartFailed`. The
+/// observers stay registered, so a later notification can still bring capture back.
+///
+/// While retries are pending the app neither records nor plays, so iOS may suspend it
+/// and the retry timers would not fire. A background task assertion keeps it running
+/// from the first failed attempt until success, the final failure, an interruption's
+/// `.began` or `stop()`. If the assertion expires first, the failure is reported at once.
 final class MicrophoneAudioSource: AudioSource {
     /// Delays before the retries that follow a failed immediate restart attempt.
     private static let retryDelays: [TimeInterval] = [1, 2, 5, 10, 30]
@@ -46,6 +52,11 @@ final class MicrophoneAudioSource: AudioSource {
     // MARK: Main-thread state
 
     private var engine: AVAudioEngine?
+    /// The engine removed by the last teardown. It is released only at the next teardown
+    /// (or in deinit), never in the teardown itself: that may run inside the engine's own
+    /// configuration-change handler, where deallocating the engine can deadlock
+    /// (see the note on `AVAudioEngineConfigurationChangeNotification` in AVAudioEngine.h).
+    private var retiredEngine: AVAudioEngine?
     /// `true` between `start()` and `stop()`.
     private var isRunning = false
     /// `true` between an interruption's `.began` and its `.ended`.
@@ -58,6 +69,12 @@ final class MicrophoneAudioSource: AudioSource {
     private var restartGeneration = 0
     private var sessionObservers: [NSObjectProtocol] = []
     private var engineObserver: NSObjectProtocol?
+    /// Held while restart retries are pending; `.invalid` otherwise.
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Error of the latest failed attempt in the current restart chain.
+    private var lastRestartError: Error?
+    /// `true` once the current restart chain has reported its failure.
+    private var restartFailureReported = false
 
     // MARK: callbackQueue state
 
@@ -83,6 +100,10 @@ final class MicrophoneAudioSource: AudioSource {
         }
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
+        // Ends a pending assertion; its expiration handler cannot do it once self is gone.
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+        }
     }
 
     // MARK: - AudioSource
@@ -114,6 +135,7 @@ final class MicrophoneAudioSource: AudioSource {
         }
         isRunning = false
         restartGeneration += 1
+        endBackgroundTask()
         removeSessionObservers()
         tearDownEngine()
         sessionManager.deactivate()
@@ -180,7 +202,8 @@ final class MicrophoneAudioSource: AudioSource {
         }
     }
 
-    /// Removes the tap and stops the engine; the current segment is closed.
+    /// Removes the tap and stops the engine; the current segment is closed. The engine is
+    /// kept as `retiredEngine`, which releases the engine retired one teardown earlier.
     private func tearDownEngine() {
         if let engineObserver {
             NotificationCenter.default.removeObserver(engineObserver)
@@ -191,6 +214,7 @@ final class MicrophoneAudioSource: AudioSource {
         }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        retiredEngine = engine
         self.engine = nil
 
         let segment = segmentCounter
@@ -208,6 +232,8 @@ final class MicrophoneAudioSource: AudioSource {
         reportInterruptionIfNeeded(reason)
         tearDownEngine()
         restartGeneration += 1
+        lastRestartError = nil
+        restartFailureReported = false
         attemptRestart(retryIndex: 0, generation: restartGeneration)
     }
 
@@ -219,11 +245,15 @@ final class MicrophoneAudioSource: AudioSource {
         do {
             try sessionManager.configureForRecording()
             try beginSegment()
+            endBackgroundTask()
         } catch {
+            lastRestartError = error
             guard retryIndex < MicrophoneAudioSource.retryDelays.count else {
-                reportFailure(MicrophoneError.restartFailed(error))
+                reportRestartFailure(error)
+                endBackgroundTask()
                 return
             }
+            beginBackgroundTaskIfNeeded()
             let delay = MicrophoneAudioSource.retryDelays[retryIndex]
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.attemptRestart(retryIndex: retryIndex + 1, generation: generation)
@@ -247,13 +277,49 @@ final class MicrophoneAudioSource: AudioSource {
         }
     }
 
-    private func reportFailure(_ error: Error) {
+    /// Reports the failure of the current restart chain once. A retry that is still
+    /// scheduled may succeed later; it then simply begins a new segment.
+    private func reportRestartFailure(_ error: Error) {
+        guard !restartFailureReported else {
+            return
+        }
+        restartFailureReported = true
+        let failure = MicrophoneError.restartFailed(error)
         callbackQueue.async { [weak self] in
             guard let self else {
                 return
             }
-            self.delegate?.audioSource(self, didFailWith: error)
+            self.delegate?.audioSource(self, didFailWith: failure)
         }
+    }
+
+    // MARK: - Background time (main thread)
+
+    private func beginBackgroundTaskIfNeeded() {
+        guard backgroundTask == .invalid else {
+            return
+        }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "MicrophoneRestart") { [weak self] in
+            self?.backgroundTimeExpired()
+        }
+    }
+
+    /// Called on the main thread when the background time runs out (about 30 s, which
+    /// covers the retries after 1, 2, 5 and 10 s but not the one after 30 s). The failure
+    /// is reported now, so the outage is not silent while the app is suspended.
+    private func backgroundTimeExpired() {
+        if let lastRestartError {
+            reportRestartFailure(lastRestartError)
+        }
+        endBackgroundTask()
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else {
+            return
+        }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 
     // MARK: - Notifications (main thread)
@@ -292,18 +358,18 @@ final class MicrophoneAudioSource: AudioSource {
         switch type {
         case .began:
             // The system has already stopped the engine. Pending retries would only
-            // fail while the interruption lasts.
+            // fail while the interruption lasts, so they and their assertion end here.
             isSystemInterrupted = true
             restartGeneration += 1
+            endBackgroundTask()
             reportInterruptionIfNeeded(.systemInterruption)
             tearDownEngine()
         case .ended:
+            // Restart on every end, with or without `.shouldResume`: a night recording
+            // must always resume. If another app still holds the session, activation
+            // fails and the retry chain takes over.
             isSystemInterrupted = false
-            let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-            if options.contains(.shouldResume) {
-                restart(reason: .systemInterruption)
-            }
+            restart(reason: .systemInterruption)
         @unknown default:
             break
         }
