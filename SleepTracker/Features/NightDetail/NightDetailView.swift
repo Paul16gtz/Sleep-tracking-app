@@ -1,9 +1,9 @@
 import SwiftData
 import SwiftUI
 
-/// Detail of one night (phase 1): the summary and the chronological event list with
-/// clip playback and single-event delete. Both sections are rows of a `List`, so the
-/// event rows can offer swipe actions.
+/// Detail of one night: the summary, the timeline chart and the chronological event
+/// list with clip playback and single-event delete. All sections are rows of a `List`,
+/// so the event rows can offer swipe actions.
 struct NightDetailView: View {
     let session: SleepSession
 
@@ -18,6 +18,7 @@ struct NightDetailView: View {
         let events = NightDetailView.chronological(session.events)
         List {
             summarySection(stats)
+            timelineSection(events)
             eventsSection(events)
         }
         .scrollContentBackground(.hidden)
@@ -51,6 +52,18 @@ struct NightDetailView: View {
                 LabeledContent("Unruhe-Index", value: NightDetailView.restlessnessText(stats))
                 LabeledContent("Unterbrechungen", value: String(stats.interruptionCount))
             }
+            .listRowBackground(Theme.card)
+        }
+    }
+
+    private func timelineSection(_ events: [SoundEvent]) -> some View {
+        Section("Zeitachse") {
+            NightTimelineChart(
+                points: NightDetailView.timelinePoints(session.epochs),
+                events: NightDetailView.timelineEvents(events),
+                range: NightDetailView.timelineRange(of: session)
+            )
+            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
             .listRowBackground(Theme.card)
         }
     }
@@ -114,6 +127,41 @@ struct NightDetailView: View {
             }
             return lhs.typeRaw < rhs.typeRaw
         }
+    }
+
+    /// `session.epochs` is unordered. Levels below the chart floor are drawn on it, so a
+    /// silent epoch (`LevelMeter.silenceFloor`) does not squash the rest of the line.
+    private static func timelinePoints(_ epochs: [EpochSample]) -> [TimelinePoint] {
+        epochs
+            .sorted { $0.timestamp < $1.timestamp }
+            .enumerated()
+            .map { index, epoch in
+                TimelinePoint(
+                    id: index,
+                    time: epoch.timestamp,
+                    decibels: max(NightTimelineChart.decibelFloor, epoch.averageDecibels)
+                )
+            }
+    }
+
+    /// Expects `events` in chronological order. A bar ends at max(end, start + 20 s)
+    /// (`TimelineEvent.minimumVisibleDuration`), so a short event stays visible on a long axis.
+    private static func timelineEvents(_ events: [SoundEvent]) -> [TimelineEvent] {
+        events.map { event in
+            TimelineEvent(
+                id: event.id,
+                type: event.type,
+                start: event.startDate,
+                end: max(event.endDate, event.startDate + TimelineEvent.minimumVisibleDuration)
+            )
+        }
+    }
+
+    /// A running night extends to now; a night under a minute still gets a 60 s axis, so
+    /// the range is never empty.
+    private static func timelineRange(of session: SleepSession) -> ClosedRange<Date> {
+        let end = max(session.endDate ?? Date(), session.startDate + 60)
+        return session.startDate ... end
     }
 
     /// Phase 1 records no motion, so no epoch is marked restless and the index shows "–";
