@@ -1,0 +1,73 @@
+# Builds the app and runs the unit tests on an iOS simulator.
+# No code signing is involved; the Xcode project is generated from project.yml.
+name: Build and test
+
+on: [push, pull_request]
+
+# A newer run for the same ref replaces the one still in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The workflow only reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Select an iPhone simulator
+        run: |
+          # Prefer the last (newest) available iPhone; fall back to "iPhone 16".
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names=[dev['name'] for k,v in d.items() if 'iOS' in k for dev in v if dev['name'].startswith('iPhone')]; print(names[-1] if names else 'iPhone 16')")
+          echo "Selected simulator: $DEVICE"
+          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+
+      - name: Show toolchain and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | head -40
+
+      - name: Build and test
+        shell: bash
+        run: |
+          # The complete output goes to build.log; the console only shows the
+          # lines that matter. The step's exit code must be xcodebuild's own:
+          # `|| status=${PIPESTATUS[0]}` keeps a grep without matches (exit 1)
+          # from failing a green build, and from hiding a failed one.
+          set -o pipefail
+          status=0
+          xcodebuild \
+            -project SleepTracker.xcodeproj \
+            -scheme SleepTracker \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            -derivedDataPath build/DerivedData \
+            clean build test 2>&1 \
+            | tee build.log \
+            | grep --line-buffered -E "error:|warning: unre|Test Case|Executed|BUILD|TEST|\*\* " \
+            || status=${PIPESTATUS[0]}
+          exit "$status"
+
+      - name: Upload the xcodebuild log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build.log
+          retention-days: 7

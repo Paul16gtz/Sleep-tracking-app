@@ -364,4 +364,5 @@ Die Tests (`SleepTrackerTests/`, XCTest, 102 Testmethoden in 14 Dateien) decken 
   xcodebuild test -project SleepTracker.xcodeproj -scheme SleepTracker \
     -destination 'platform=iOS Simulator,name=iPhone 15'
   ```
-- Phase 2 ergänzt einen CI-Workflow, der das auf einem macOS-Runner ohne Signing ausführt.
+
+**CI:** Der Workflow `.github/workflows/build.yml` läuft bei jedem Push und Pull Request auf einem macOS-Runner (GitHub Actions). Er installiert XcodeGen, erzeugt das Projekt mit `xcodegen generate`, wählt einen verfügbaren iPhone-Simulator, baut die App dafür und führt die Unit-Tests dort aus, ganz ohne Code Signing. Das vollständige `xcodebuild`-Protokoll hängt pro Lauf als Artefakt `xcodebuild-log` an (sieben Tage lang): auf GitHub unter Actions den Lauf öffnen, unten bei Artifacts. Auch dieser Workflow wurde noch nie ausgeführt; offene Annahmen stehen in `docs/unverified.md`.
