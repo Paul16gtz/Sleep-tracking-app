@@ -11,6 +11,10 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Nächte", systemImage: "list.bullet")
                 }
+            SettingsView()
+                .tabItem {
+                    Label("Einstellungen", systemImage: "gearshape.fill")
+                }
         }
     }
 }
