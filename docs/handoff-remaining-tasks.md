@@ -70,9 +70,9 @@ Texte stehen in Teil B, damit sie später nachgerüstet werden können.
 - Hinweis aus Review 14: `isRunning` wird false, bevor die letzten Epochen/Ereignisse gespeichert
   sind (eine Main-Queue-Runde später). UI, die beim Übergang einmalig rechnet, würde sie verpassen;
   SwiftData-Beobachtung (`@Query`, Model-Objekte) ist davon nicht betroffen.
-- Deferred Minors aus den Reviews stehen in `.superpowers/sdd/plan/progress.md` (gitignored, nur in
-  der ursprünglichen Session) und sollen vom Final-Review triagiert werden; die für diese Tasks
-  relevanten sind oben aufgeführt.
+- Deferred Minors aus den Reviews und alle Rulings stehen in `docs/sdd-ledger.md` (Kopie des SDD-Ledgers)
+  und sollen vom Final-Review triagiert werden; die für diese Tasks relevanten sind oben aufgeführt.
+  `docs/sdd-constraints.md` ist die Kopie von `constraints.md` für ein neues Arbeitsverzeichnis.
 
 ### 0.3 Ablauf pro Task (Subagent-Driven Development)
 
@@ -502,7 +502,7 @@ You are a Senior Code Reviewer with expertise in iOS (Swift 5 language mode, Swi
 Read docs/spec.md (the binding spec; Teil B holds design decisions), docs/plan.md (tasks 1–25; tasks 18/19 deferred by the user — motion/restlessness is NOT implemented, the Unruhe-Index shows "–"), README.md (setup, "Ungeprüfte Stellen" = known API uncertainties — do not re-report those as findings unless you can say concretely that the code is wrong and how to fix it; DO report any uncertain API that is NOT listed there), docs/unverified.md.
 
 ## Deferred minors and rulings to triage
-Read <WORKSPACE>/progress.md (the SDD ledger): every line starting with "Task N: minor (deferred)" is a known small issue; every "Ruling:" is a controller decision. Triage the minors: which must be fixed before this branch is handed to the user for the first device build, which can wait. Say so explicitly per item (by task number and one-liner).
+Read docs/sdd-ledger.md (the SDD ledger, copied from the original session workspace): every line starting with "Task N: minor (deferred)" is a known small issue; every "Ruling:" is a controller decision. Triage the minors: which must be fixed before this branch is handed to the user for the first device build, which can wait. Say so explicitly per item (by task number and one-liner).
 
 ## Git range
 Base: <MERGE_BASE>   Head: <HEAD>
@@ -855,7 +855,7 @@ Verdict every finding ADDRESSED or NOT ADDRESSED with file:line evidence ("attem
 ---
 
 *Platzhalter:* `<WORKSPACE>` ist das SDD-Arbeitsverzeichnis (in der ursprünglichen Session
-`.superpowers/sdd/plan`, gitignored; in einer neuen Session neu anlegen und `constraints.md` aus Teil 0.1
+`.superpowers/sdd/plan`, gitignored; in einer neuen Session neu anlegen, `docs/sdd-constraints.md` als `constraints.md`
 dort ablegen, Briefs aus `docs/plan.md` extrahieren). `<BASE_SHA>`/`<HEAD_SHA>`/`<DIFF_FILE>` pro Task einsetzen.
 
 ---
