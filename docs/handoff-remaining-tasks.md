@@ -1,5 +1,7 @@
 # Übergabe: verbleibende Tasks (21–25, Final) und zurückgestellte Tasks (18, 19)
 
+> **Status:** Alle hier beschriebenen Tasks (18–25) und der später im Plan ergänzte Task 26 wurden in der ursprünglichen Session umgesetzt; das Final-Review wird dort abgeschlossen. Dieses Dokument dient nur noch als Referenz für die verwendeten Prompts.
+
 Dieses Dokument enthält alles, was eine andere Session braucht, um die restlichen Tasks des Plans
 (`docs/plan.md`) nach demselben Verfahren auszuführen wie Tasks 1–20: pro Task ein frischer
 Implementer-Subagent, danach ein Reviewer, bei Findings Fix-Runden mit Re-Review.
