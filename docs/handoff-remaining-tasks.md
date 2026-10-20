@@ -857,3 +857,21 @@ Verdict every finding ADDRESSED or NOT ADDRESSED with file:line evidence ("attem
 *Platzhalter:* `<WORKSPACE>` ist das SDD-Arbeitsverzeichnis (in der ursprünglichen Session
 `.superpowers/sdd/plan`, gitignored; in einer neuen Session neu anlegen und `constraints.md` aus Teil 0.1
 dort ablegen, Briefs aus `docs/plan.md` extrahieren). `<BASE_SHA>`/`<HEAD_SHA>`/`<DIFF_FILE>` pro Task einsetzen.
+
+---
+
+## Nachtrag aus Review 20 (für Tasks 23 und 25)
+
+- **Task 23 (Testmodus):** Die Zeitachse nutzt die x-Domain `session.startDate ... max(session.endDate ?? now, startDate + 60 s)`.
+  Der Testmodus läuft schneller als Echtzeit; `stop()` setzt `endDate = Date()` (Wanduhr). Damit liegen die
+  Ereignisse/Epochen einer Test-Session innerhalb der Domain nur, wenn die Session-Zeiten sessionrelativ
+  (Stream-Zeit) persistiert werden, was der Fall ist, und `endDate` ≥ letztes Datendatum ist. Im Testmodus
+  deshalb `endDate` auf `max(Date(), letzte Epoche/letztes Ereignis-Ende)` setzen oder `timelineRange` in
+  `NightDetailView` zusätzlich über das letzte Datendatum spannen. In den Reviewer-Prompt von Task 23 aufnehmen.
+- **Task 25 (README):** Durch die neue Sektion "Zeitachse" haben sich die Zeilenreferenzen der Task-16-Einträge
+  zu `NightDetailView.swift` verschoben (README U52, U61, U62). `docs/unverified.md` enthält eine Mapping-Notiz;
+  die README-Einträge beim Neuaufbau der "Ungeprüften Stellen" aus der aktuellen `docs/unverified.md` übernehmen.
+  Weitere Review-17-Minors für Task 25: Phase-2-Dateiliste um `Persistence/CSVExporter.swift` ergänzen;
+  U2-Symptom als Linker-Fehler ("Undefined symbol") UND "No such module" nennen; Schritt 3 der Mac-Anleitung
+  ("Im Repository-Ordner" vor `git clone`) umformulieren; Satz "weil Xcode und macOS bei dir auf Englisch laufen"
+  neutral fassen; U37-Übersetzung ("Service → Analyzer → Service") korrigieren.
