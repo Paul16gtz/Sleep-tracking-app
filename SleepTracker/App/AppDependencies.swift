@@ -14,6 +14,7 @@ final class AppDependencies: ObservableObject {
     let repository: SessionRepository
     let settingsStore: SettingsStore
     let sessionController: SleepSessionController
+    let clipPlayer: ClipPlayer
 
     /// Throws when the directories cannot be created or the store cannot be opened.
     init() throws {
@@ -43,12 +44,14 @@ final class AppDependencies: ObservableObject {
             classifierFactoryProvider: { SoundClassifierService.makeFactory(mapping: $0) },
             knownLabelsProvider: { try SoundClassifierService.knownLabels() }
         )
+        let clipPlayer = ClipPlayer(fileStore: fileStore)
 
         self.fileStore = fileStore
         self.modelContainer = modelContainer
         self.repository = repository
         self.settingsStore = settingsStore
         self.sessionController = sessionController
+        self.clipPlayer = clipPlayer
     }
 
     /// Applies the protection class to the store file and to its sidecar files that

@@ -7,7 +7,7 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Heute Nacht", systemImage: "moon.zzz.fill")
                 }
-            Text("Nächte")
+            NightsListView()
                 .tabItem {
                     Label("Nächte", systemImage: "list.bullet")
                 }

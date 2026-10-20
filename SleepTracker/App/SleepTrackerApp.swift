@@ -24,6 +24,7 @@ struct SleepTrackerApp: App {
                     .environmentObject(deps)
                     .environmentObject(deps.sessionController)
                     .environmentObject(deps.settingsStore)
+                    .environmentObject(deps.clipPlayer)
                     .modelContainer(deps.modelContainer)
                     .preferredColorScheme(.dark)
             } else {
