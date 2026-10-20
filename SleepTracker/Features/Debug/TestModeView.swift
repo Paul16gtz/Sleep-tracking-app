@@ -10,6 +10,7 @@ struct TestModeView: View {
     private static let copyPrefix = "testmode-"
 
     @EnvironmentObject private var sessionController: SleepSessionController
+    @EnvironmentObject private var clipPlayer: ClipPlayer
 
     @State private var isImporterPresented = false
     /// `true` once a test run started from this screen; shows the saved hint after it.
@@ -162,12 +163,15 @@ struct TestModeView: View {
         }
     }
 
-    /// Starts the run on the copy; a failed start removes it again.
+    /// Starts the run on the copy; a failed start removes it again. A loaded clip is
+    /// stopped first, as before a night.
     private func startTest(reading copy: URL) {
         copiedFileURL = copy
         didRun = false
         let controller = sessionController
+        let player = clipPlayer
         Task { @MainActor in
+            player.stop()
             do {
                 try await controller.start(mode: .test(fileURL: copy))
                 didRun = true

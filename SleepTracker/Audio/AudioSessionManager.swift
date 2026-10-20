@@ -25,4 +25,10 @@ final class AudioSessionManager {
     func deactivate() {
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
     }
+
+    /// `true` while the session is set to the recording category, so a night records or
+    /// ended last without anything changing the category since.
+    var isConfiguredForRecording: Bool {
+        session.category == .record
+    }
 }

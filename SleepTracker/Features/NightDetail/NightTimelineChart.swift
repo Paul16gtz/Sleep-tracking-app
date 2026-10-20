@@ -7,8 +7,9 @@ struct TimelinePoint: Identifiable {
     let id: Int
     /// Start of the epoch.
     let time: Date
-    /// Average level of the epoch in dBFS, already clamped to the chart floor.
-    let decibels: Double
+    /// Average level of the epoch in dBFS, already clamped to the chart floor; nil when
+    /// the epoch has no measured level (its audio was lost in an interruption gap).
+    let decibels: Double?
     /// Motion intensity of the epoch; 0 when no motion was recorded.
     let motion: Double
     let isRestless: Bool
@@ -41,6 +42,9 @@ struct NightTimelineChart: View {
 
     /// Lowest level the loudness chart shows; quieter epochs sit on this line.
     static let decibelFloor: Double = -80
+    /// Longest time between two loudness points that the line still connects. Epochs are
+    /// 30 s apart, so a longer distance is a gap without a measured level.
+    private static let maximumLineGap: TimeInterval = 60
 
     private static let loudnessChartHeight: CGFloat = 120
     private static let motionChartHeight: CGFloat = 80
@@ -78,14 +82,19 @@ struct NightTimelineChart: View {
     }
 
     private var loudnessChart: some View {
-        Chart(points) { point in
+        Chart(loudnessPoints) { point in
             // On the mark, not the chart view: the view-level style would also tint the
-            // axis labels, which resolve their secondary style against it.
-            LineMark(x: .value("Zeit", point.time), y: .value("dB", point.decibels))
-                .foregroundStyle(Theme.accent)
+            // axis labels, which resolve their secondary style against it. One series per
+            // segment, so the line is not drawn through a gap as if it were measured.
+            LineMark(
+                x: .value("Zeit", point.time),
+                y: .value("dB", point.decibels),
+                series: .value("Abschnitt", point.segment)
+            )
+            .foregroundStyle(Theme.accent)
         }
         .chartYScale(domain: NightTimelineChart.decibelFloor ... 0.0)
-        .sharedTimeAxis(range: range, labelStride: axisStride)
+        .sharedAxes(range: range, labelStride: axisStride)
         .frame(height: NightTimelineChart.loudnessChartHeight)
     }
 
@@ -100,7 +109,7 @@ struct NightTimelineChart: View {
             )
             .foregroundStyle(point.isRestless ? Color.orange : Color.gray)
         }
-        .sharedTimeAxis(range: range, labelStride: axisStride)
+        .sharedAxes(range: range, labelStride: axisStride)
         .frame(height: NightTimelineChart.motionChartHeight)
     }
 
@@ -117,7 +126,7 @@ struct NightTimelineChart: View {
         }
         // Rows in the legend's order instead of the order of first appearance.
         .chartYScale(domain: presentTypes.map { $0.germanName })
-        .sharedTimeAxis(range: range, labelStride: axisStride)
+        .sharedAxes(range: range, labelStride: axisStride)
         .frame(height: eventChartHeight)
     }
 
@@ -158,6 +167,26 @@ struct NightTimelineChart: View {
             .foregroundStyle(.secondary)
     }
 
+    /// The points with a measured level. A new line segment begins after more than
+    /// `maximumLineGap` without one, so the line breaks at an interruption.
+    private var loudnessPoints: [LoudnessPoint] {
+        var result: [LoudnessPoint] = []
+        var segment = 0
+        var previousTime: Date?
+        for point in points {
+            guard let decibels = point.decibels else {
+                continue
+            }
+            if let previous = previousTime,
+               point.time.timeIntervalSince(previous) > NightTimelineChart.maximumLineGap {
+                segment += 1
+            }
+            result.append(LoudnessPoint(id: point.id, time: point.time, decibels: decibels, segment: segment))
+            previousTime = point.time
+        }
+        return result
+    }
+
     /// Event types of this night in `SoundEventType.allCases` order.
     private var presentTypes: [SoundEventType] {
         let present = Set(events.map { $0.type })
@@ -181,21 +210,68 @@ struct NightTimelineChart: View {
     }
 }
 
+/// One point of the loudness line; `segment` numbers the parts of the line.
+private struct LoudnessPoint: Identifiable {
+    /// The `id` of the `TimelinePoint` it comes from.
+    let id: Int
+    let time: Date
+    let decibels: Double
+    let segment: Int
+}
+
 /// Distance between two labels on the shared time axis.
 private struct TimeAxisStride {
     let component: Calendar.Component
     let count: Int
 }
 
+/// Y-axis labels of one fixed width. Swift Charts narrows the plot area by the width of
+/// the y labels, so with labels of the same width in every chart all plot areas are
+/// equally wide and a time lands on the same x position in each of them.
+private enum FixedWidthAxisLabel {
+    /// Wide enough for "Schnarchen" in the axis font; a longer text shrinks to fit.
+    static let width: CGFloat = 64
+
+    /// Numbers with at most two decimals in the device locale ("-40", "0,5").
+    private static let numberFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 2
+        formatter.usesGroupingSeparator = false
+        return formatter
+    }()
+
+    /// A number for the loudness and the motion chart, the type name for the event chart.
+    static func text(for value: AxisValue) -> String {
+        if let number = value.as(Double.self) {
+            return numberFormatter.string(from: NSNumber(value: number)) ?? ""
+        }
+        return value.as(String.self) ?? ""
+    }
+}
+
 private extension View {
-    /// The x domain and axis all charts share, so their time columns line up.
-    func sharedTimeAxis(range: ClosedRange<Date>, labelStride: TimeAxisStride) -> some View {
+    /// The x domain and axis all charts share, and a y axis on the trailing edge with
+    /// labels of one fixed width, so the time columns of all charts line up.
+    func sharedAxes(range: ClosedRange<Date>, labelStride: TimeAxisStride) -> some View {
         self
             .chartXScale(domain: range)
             .chartXAxis {
                 AxisMarks(values: .stride(by: labelStride.component, count: labelStride.count)) { _ in
                     AxisGridLine()
                     AxisValueLabel(format: .dateTime.hour().minute())
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .trailing) { value in
+                    AxisGridLine()
+                    AxisValueLabel {
+                        Text(FixedWidthAxisLabel.text(for: value))
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                            .frame(width: FixedWidthAxisLabel.width, alignment: .leading)
+                    }
                 }
             }
     }

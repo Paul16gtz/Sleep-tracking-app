@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Hints shown before a night starts: power (only when not charging), placement of
-/// the iPhone and the fall-asleep delay. Starting stays possible in every case.
+/// Hints shown before a night starts: power (only when not charging), placement of the
+/// iPhone, the fall-asleep delay and other apps' audio. Starting is always possible.
 struct StartHintsSheet: View {
     /// Called once when the user taps "Jetzt starten"; the sheet dismisses itself.
     let onStart: () -> Void
@@ -32,6 +32,13 @@ struct StartHintsSheet: View {
                 HintRow(
                     symbolName: "hourglass",
                     text: "Während der Einschlafverzögerung werden noch keine Ereignisse gezählt.",
+                    tint: Theme.accent
+                )
+                .listRowBackground(Theme.card)
+                // The recording session cannot mix with other apps' playback (spec B1).
+                HintRow(
+                    symbolName: "speaker.slash",
+                    text: "Keine Musik oder Einschlafgeräusche aus anderen Apps abspielen – sie unterbrechen die Aufnahme.",
                     tint: Theme.accent
                 )
                 .listRowBackground(Theme.card)

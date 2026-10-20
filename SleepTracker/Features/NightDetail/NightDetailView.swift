@@ -247,9 +247,8 @@ struct NightDetailView: View {
             }
     }
 
-    /// `session.epochs` is unordered. Levels below the chart floor are drawn on it, so a
-    /// silent epoch (`LevelMeter.silenceFloor`) does not squash the rest of the line.
-    /// Motion intensity and the restless flag are taken over unchanged.
+    /// `session.epochs` is unordered. Motion intensity and the restless flag are taken
+    /// over unchanged; the level as `chartLevel(_:)` gives it.
     private static func timelinePoints(_ epochs: [EpochSample]) -> [TimelinePoint] {
         epochs
             .sorted { $0.timestamp < $1.timestamp }
@@ -258,11 +257,22 @@ struct NightDetailView: View {
                 TimelinePoint(
                     id: index,
                     time: epoch.timestamp,
-                    decibels: max(NightTimelineChart.decibelFloor, epoch.averageDecibels),
+                    decibels: NightDetailView.chartLevel(epoch.averageDecibels),
                     motion: epoch.motionIntensity,
                     isRestless: epoch.isRestless
                 )
             }
+    }
+
+    /// An epoch at `LevelMeter.silenceFloor` has no measured level (its audio half was lost
+    /// in an interruption gap, or no buffer reached it): nil, so the gap is not drawn as
+    /// silence while the epoch's motion bar stays. Other levels below the chart floor are
+    /// drawn on it, so they do not squash the rest of the line.
+    private static func chartLevel(_ averageDecibels: Double) -> Double? {
+        guard averageDecibels > LevelMeter.silenceFloor else {
+            return nil
+        }
+        return max(NightTimelineChart.decibelFloor, averageDecibels)
     }
 
     /// Expects `events` in chronological order. A bar ends at max(end, start + 20 s)

@@ -50,11 +50,15 @@ final class ClipPlayer: NSObject, ObservableObject {
     }
 
     /// Stops playback, unloads the clip and releases the audio session if this player
-    /// activated it.
+    /// activated it. A session that is set to `.record` again belongs to a night that
+    /// started meanwhile; deactivating it would stop the running capture without any
+    /// notification, so it is left alone.
     func stop() {
         unloadPlayer()
         if hasActivatedSession {
-            sessionManager.deactivate()
+            if !sessionManager.isConfiguredForRecording {
+                sessionManager.deactivate()
+            }
             hasActivatedSession = false
         }
     }

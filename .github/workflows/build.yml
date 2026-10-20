@@ -21,8 +21,17 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
+      - name: Select Xcode 16.4
+        run: |
+          # The version the build was verified with; the image's default Xcode may change.
+          # Without it the default Xcode is kept, so a newer image does not fail here.
+          if [ -d /Applications/Xcode_16.4.app ]; then sudo xcode-select -s /Applications/Xcode_16.4.app; fi
+          xcode-select -p
+
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          brew install xcodegen
+          xcodegen --version
 
       - name: Generate the Xcode project
         run: xcodegen generate

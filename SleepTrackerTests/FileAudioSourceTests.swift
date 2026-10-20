@@ -74,9 +74,12 @@ final class FileAudioSourceTests: XCTestCase {
         source.delegate = spy
 
         try source.start()
-        waitForExpectations(timeout: 5)
-        // A second finish would be queued before this block.
-        queue.sync { }
+        // The source is not used below; it must not be released while it still reads.
+        withExtendedLifetime(source) {
+            waitForExpectations(timeout: 5)
+            // A second finish would be queued before this block.
+            queue.sync { }
+        }
 
         let calls = queue.sync { spy.calls }
         XCTAssertEqual(calls.first, .begin(sampleRate: 16_000, channelCount: 1))
@@ -122,10 +125,13 @@ final class FileAudioSourceTests: XCTestCase {
         source.delegate = spy
 
         try source.start()
-        waitForExpectations(timeout: 5)
-        // Runs the chunk that was scheduled before the stop took effect, and anything after it.
-        queue.sync { }
-        queue.sync { }
+        // The source is not used below; it must not be released while it still reads.
+        withExtendedLifetime(source) {
+            waitForExpectations(timeout: 5)
+            // Runs the chunk that was scheduled before the stop took effect, and anything after it.
+            queue.sync { }
+            queue.sync { }
+        }
 
         let calls = queue.sync { spy.calls }
         XCTAssertEqual(calls.count, 2)

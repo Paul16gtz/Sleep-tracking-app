@@ -5,6 +5,7 @@ import SwiftUI
 struct TonightView: View {
     @EnvironmentObject private var controller: SleepSessionController
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var clipPlayer: ClipPlayer
 
     @State private var showHints = false
 
@@ -76,10 +77,14 @@ struct TonightView: View {
         )
     }
 
-    /// Starts a night; a failure is shown in the error alert.
+    /// Starts a night; a failure is shown in the error alert. A clip that is still loaded
+    /// (playing or paused) is stopped first, so it releases its playback session before
+    /// the night sets up the recording session (spec B1).
     private func startNight() {
         let sessionController = controller
+        let player = clipPlayer
         Task { @MainActor in
+            player.stop()
             do {
                 try await sessionController.start(mode: .night)
             } catch {
