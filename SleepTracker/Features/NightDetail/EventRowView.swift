@@ -12,6 +12,16 @@ struct EventRowView: View {
     @EnvironmentObject private var sessionController: SleepSessionController
 
     var body: some View {
+        // The row observes the controller and the clip player on its own, so one of their
+        // updates can rebuild it after its event was deleted; then it reads nothing of it.
+        if event.isDeletedFromContext {
+            EmptyView()
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: 12) {
             Image(systemName: event.type.symbolName)
                 .font(.title3)

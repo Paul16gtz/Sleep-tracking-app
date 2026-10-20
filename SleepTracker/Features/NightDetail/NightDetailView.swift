@@ -10,20 +10,36 @@ struct NightDetailView: View {
     @EnvironmentObject private var dependencies: AppDependencies
     @EnvironmentObject private var clipPlayer: ClipPlayer
 
+    /// The stored session with this night's id; empty once it was deleted. Unlike the held
+    /// model, the query refreshes after every save of the context, so a delete re-runs `body`.
+    @Query private var current: [SleepSession]
+
     /// Message for a failed event delete (German); nil means no error.
     @State private var deleteErrorMessage: String? = nil
     /// Temporary CSV file of this night for the `ShareLink`; nil until it is written or when writing failed.
     @State private var exportURL: URL? = nil
 
+    init(session: SleepSession) {
+        self.session = session
+        let sessionID = session.id
+        _current = Query(filter: #Predicate<SleepSession> { $0.id == sessionID })
+    }
+
     var body: some View {
         // Checked before any other property of the session is read: "Alle Daten löschen" in
         // the settings tab can delete the night while this view is still pushed in the
         // "Nächte" tab, and reading a deleted model may trap.
-        if NightDetailView.isDeleted(session) {
+        if isSessionGone {
             deletedPlaceholder
         } else {
             nightContent
         }
+    }
+
+    /// The night was deleted: the query no longer finds it, or the held model is marked as
+    /// deleted or detached. Reads no stored attribute of the session.
+    private var isSessionGone: Bool {
+        current.isEmpty || session.isDeletedFromContext
     }
 
     @ViewBuilder
@@ -152,8 +168,12 @@ struct NightDetailView: View {
     }
 
     /// Deletes the event through the repository, which removes its clip file too. A
-    /// loaded clip of the event (playing or paused) is stopped first.
+    /// loaded clip of the event (playing or paused) is stopped first. A swipe on a row left
+    /// over from a deleted night or event does nothing, so no deleted model is read.
     private func delete(_ event: SoundEvent) {
+        guard !isSessionGone, !event.isDeletedFromContext else {
+            return
+        }
         if let path = event.clipRelativePath, clipPlayer.playingPath == path {
             clipPlayer.stop()
         }
@@ -169,7 +189,7 @@ struct NightDetailView: View {
     /// button. A failure leaves no URL (the toolbar keeps its inactive icon), so a stale
     /// file is never offered.
     private func refreshExport() {
-        guard !NightDetailView.isDeleted(session) else {
+        guard !isSessionGone else {
             exportURL = nil
             return
         }
@@ -189,19 +209,13 @@ struct NightDetailView: View {
     /// row, bar or export line is built from one.
     private static func chronological(_ events: [SoundEvent]) -> [SoundEvent] {
         events
-            .filter { !isDeleted($0) }
+            .filter { !$0.isDeletedFromContext }
             .sorted { lhs, rhs in
                 if lhs.startDate != rhs.startDate {
                     return lhs.startDate < rhs.startDate
                 }
                 return lhs.typeRaw < rhs.typeRaw
             }
-    }
-
-    /// A model deleted elsewhere: its context is gone after the save, and before the save
-    /// it is marked as deleted. None of its stored properties may be read any more.
-    private static func isDeleted(_ model: some PersistentModel) -> Bool {
-        model.modelContext == nil || model.isDeleted
     }
 
     /// Export rows in chronological order (the exporter sorts again).
