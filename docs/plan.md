@@ -1110,9 +1110,9 @@ Verhalten:
 
 # Phase 2
 
-> **Änderung (Nutzerentscheidung, 2026-10-20):** Tasks 18 und 19 (Bewegung/Unruhe über CoreMotion) werden vorerst **nicht umgesetzt**. Die Funktion bleibt offen und kann später nachgerüstet werden. Die Datenmodell-Felder `motionIntensity`/`isRestless` bleiben bestehen (immer 0/false), damit eine spätere Ergänzung ohne Migration möglich ist. Folgen für die übrigen Tasks: Task 20 zeigt zwei Diagramme (Lautstärke, Ereignisse) ohne Bewegungsbalken; Task 22 hat keine Sektion "Bewegung"; Task 23 hat keine Sektion "Bewegung" im Debug-Bereich; Task 21 behält die CSV-Spalten `motion_intensity`/`is_restless` (Werte 0/false); die UI zeigt den Unruhe-Index als "nicht erfasst" an; die README nennt Bewegung/Unruhe als offene Funktion.
+> **Änderung (Nutzerentscheidung, 2026-10-20, später revidiert):** Tasks 18 und 19 (Bewegung/Unruhe über CoreMotion) waren zunächst zurückgestellt; Task 20 wurde deshalb ohne Bewegungsspur gebaut. Der Nutzer hat danach entschieden, Tasks 18 und 19 **doch umzusetzen**. Reihenfolge ab hier: 18 → 19 → 21 → 26 (Bewegung in Zeitachse und Nachtanzeigen nachrüsten) → 22 (mit Sektion "Bewegung") → 23 (mit Sektion "Bewegung" im Debug-Bereich) → 24 → 25 → Final-Review. Task 21 behält die CSV-Spalten `motion_intensity`/`is_restless` (jetzt mit echten Werten). Die README (Task 25) beschreibt Bewegung als umgesetzte Funktion mit dem Hinweis, dass Accelerometer-Updates im Hintergrund ungeprüft sind (Spec B9).
 
-### Task 18: Bewegungslogik: MotionEpochAggregator, MotionBaselineCalibrator, MotionAnalyzer (TDD) — **ZURÜCKGESTELLT (nicht umsetzen)**
+### Task 18: Bewegungslogik: MotionEpochAggregator, MotionBaselineCalibrator, MotionAnalyzer (TDD)
 
 **Files:**
 - Create: `SleepTracker/Motion/MotionEpochAggregator.swift`, `SleepTracker/Motion/MotionBaselineCalibrator.swift`, `SleepTracker/Motion/MotionAnalyzer.swift`
@@ -1170,7 +1170,7 @@ struct MotionAnalyzer {
 
 ---
 
-### Task 19: MotionSource (CoreMotion), EpochMerger, Integration in den Controller — **ZURÜCKGESTELLT (nicht umsetzen)**
+### Task 19: MotionSource (CoreMotion), EpochMerger, Integration in den Controller
 
 **Files:**
 - Create: `SleepTracker/Motion/MotionSource.swift`, `SleepTracker/Session/EpochMerger.swift`
@@ -1366,6 +1366,55 @@ Controller `start(mode: .test(fileURL:))`: keine Mikrofon-Berechtigung nötig; `
 - [ ] **Step 1: README aktualisieren**: Funktionsumfang Phase 2 (Bewegung, Diagramm, Einstellungen, CSV, Debug/Testmodus, CI), Abschnitt "CI" (Badge-Pfad `.github/workflows/build.yml`, was der Lauf prüft), Testmodus-Anleitung (Datei in "Dateien"-App ablegen, Einstellungen > Debug > Testmodus), "Ungeprüfte Stellen" komplett aus `docs/unverified.md`, "Bekannte Grenzen" ergänzen (Bewegung im Hintergrund, Kalibrierung in der Einschlafphase, Clip-Zeitstempel UTC).
 - [ ] **Step 2: Gesamtverifikation** wie Task 17 Step 2 über alle Dateien, zusätzlich: jede `@Published`-Property wird nur auf dem Main Actor gesetzt (grep nach `DispatchQueue.main` / `Task { @MainActor` in Delegate-Callbacks des Controllers); jede Protokoll-Konformität vollständig (grep der Protokoll-Methoden gegen die Implementierungen); `project.yml`-Pfade; Workflow-YAML.
 - [ ] **Step 3: Commit** `Complete phase 2: README, unverified items and verification`
+
+---
+
+### Task 26: Bewegung in Zeitachse und Nachtanzeigen nachrüsten (nach Task 19 und 21 ausführen)
+
+Task 20 wurde gebaut, als Bewegung zurückgestellt war. Dieser Task ergänzt die Bewegungsspur im Diagramm und zeigt den Unruhe-Index an, sobald eine Nacht Bewegungsdaten hat.
+
+**Files:**
+- Modify: `SleepTracker/Session/SleepSession+Statistics.swift`, `SleepTracker/Features/NightDetail/NightTimelineChart.swift`, `SleepTracker/Features/NightDetail/NightDetailView.swift`, `SleepTracker/Features/Nights/NightRowView.swift`
+- Test: `SleepTrackerTests/SleepSessionMotionTests.swift`
+
+**Interfaces:**
+- Consumes: `EpochSample.motionIntensity`, `EpochSample.isRestless` (Task 9, ab Task 19 mit echten Werten befüllt); `NightStatistics.restlessPercentage`, `restlessPhaseCount`, `totalEpochCount` (Task 13).
+- Produces:
+
+```swift
+extension SleepSession {
+    /// true, wenn mindestens eine Epoche eine Bewegungsintensität > 0 hat (Bewegung wurde aufgezeichnet).
+    var hasMotionData: Bool { get }
+}
+
+struct TimelinePoint: Identifiable {          // erweitert
+    let id: Int
+    let time: Date
+    let decibels: Double
+    let motion: Double
+    let isRestless: Bool
+}
+
+struct NightTimelineChart: View {             // erweitert
+    let points: [TimelinePoint]
+    let events: [TimelineEvent]
+    let range: ClosedRange<Date>
+    let showsMotion: Bool
+}
+```
+
+Verhalten:
+- Zwischen Lautstärke- und Ereignis-Chart ein drittes Chart "Bewegung" (Höhe 80), nur wenn `showsMotion`: je Epoche ein Balken über 30 s Breite, bevorzugt `RectangleMark(xStart: .value("Start", p.time), xEnd: .value("Ende", p.time.addingTimeInterval(30)), yStart: .value("Bewegung", 0.0), yEnd: .value("Bewegung", p.motion))`, Farbe `p.isRestless ? Color.orange : Color.gray`; gleiche x-Domain und x-Achse wie die anderen Charts; darunter eine kleine Legende "unruhig" (orange) / "ruhig" (grau).
+- `NightDetailView`: `TimelinePoint` mit `motion: epoch.motionIntensity`, `isRestless: epoch.isRestless`; `showsMotion: session.hasMotionData`. Zusammenfassung "Unruhe-Index": wenn `hasMotionData` → "\(Formatters.percent(stats.restlessPercentage)) unruhig, \(stats.restlessPhaseCount) Phasen", sonst "–".
+- `NightRowView`: "Unruhe \(Formatters.percent(stats.restlessPercentage))" wenn `hasMotionData`, sonst "Unruhe –".
+
+- [ ] **Step 1: Tests** (`SleepSessionMotionTests`, `@MainActor`, In-Memory-Container wie in `SessionRepositoryTests`):
+  - `testNoEpochsMeansNoMotionData`: Session ohne Epochen → `hasMotionData == false`.
+  - `testZeroIntensityMeansNoMotionData`: drei Epochen mit `motionIntensity 0` → `false`.
+  - `testPositiveIntensityMeansMotionData`: Epochen 0, 0.2, 0 → `true`.
+- [ ] **Step 2: Implementieren.**
+- [ ] **Step 3: Statischer Check** (`RectangleMark(xStart:xEnd:yStart:yEnd:)`-Labels; Eintrag in `unverified.md` mit Fallback `BarMark(x: .value("Zeit", p.time, unit: .minute), y: .value("Bewegung", p.motion))`).
+- [ ] **Step 4: Commit** `Show motion in the night timeline and restlessness in night summaries`
 
 ---
 
