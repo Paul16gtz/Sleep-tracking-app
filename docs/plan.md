@@ -1110,7 +1110,9 @@ Verhalten:
 
 # Phase 2
 
-### Task 18: Bewegungslogik: MotionEpochAggregator, MotionBaselineCalibrator, MotionAnalyzer (TDD)
+> **Änderung (Nutzerentscheidung, 2026-10-20):** Tasks 18 und 19 (Bewegung/Unruhe über CoreMotion) werden vorerst **nicht umgesetzt**. Die Funktion bleibt offen und kann später nachgerüstet werden. Die Datenmodell-Felder `motionIntensity`/`isRestless` bleiben bestehen (immer 0/false), damit eine spätere Ergänzung ohne Migration möglich ist. Folgen für die übrigen Tasks: Task 20 zeigt zwei Diagramme (Lautstärke, Ereignisse) ohne Bewegungsbalken; Task 22 hat keine Sektion "Bewegung"; Task 23 hat keine Sektion "Bewegung" im Debug-Bereich; Task 21 behält die CSV-Spalten `motion_intensity`/`is_restless` (Werte 0/false); die UI zeigt den Unruhe-Index als "nicht erfasst" an; die README nennt Bewegung/Unruhe als offene Funktion.
+
+### Task 18: Bewegungslogik: MotionEpochAggregator, MotionBaselineCalibrator, MotionAnalyzer (TDD) — **ZURÜCKGESTELLT (nicht umsetzen)**
 
 **Files:**
 - Create: `SleepTracker/Motion/MotionEpochAggregator.swift`, `SleepTracker/Motion/MotionBaselineCalibrator.swift`, `SleepTracker/Motion/MotionAnalyzer.swift`
@@ -1168,7 +1170,7 @@ struct MotionAnalyzer {
 
 ---
 
-### Task 19: MotionSource (CoreMotion), EpochMerger, Integration in den Controller
+### Task 19: MotionSource (CoreMotion), EpochMerger, Integration in den Controller — **ZURÜCKGESTELLT (nicht umsetzen)**
 
 **Files:**
 - Create: `SleepTracker/Motion/MotionSource.swift`, `SleepTracker/Session/EpochMerger.swift`
