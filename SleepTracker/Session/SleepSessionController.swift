@@ -33,8 +33,9 @@ enum ControllerError: LocalizedError {
     }
 }
 
-/// Orchestrates one night: starts the audio pipeline, stores its epochs, events and
-/// gaps as they arrive, publishes the live state for the UI and finishes the session.
+/// Orchestrates one night: starts the audio pipeline and the motion capture, stores
+/// their epochs, events and gaps as they arrive, publishes the live state for the UI
+/// and finishes the session.
 ///
 /// Threading (spec B4): the controller and every repository call run on the main
 /// actor. The pipeline calls its delegate on its analysis queue; the delegate methods
@@ -43,16 +44,24 @@ enum ControllerError: LocalizedError {
 /// order the pipeline reported them, and a block that `stop()` enqueues runs after the
 /// results the pipeline reported while stopping.
 ///
-/// Results are matched to their session by the pipeline that reported them. `stop()`
-/// waits for the pipeline to finish, but the last events and the partial epoch it
-/// reports then reach the main queue only after `stop()` has returned, so the stopped
-/// session is kept until they are stored.
+/// Motion samples arrive on the motion source's operation queue. The session's
+/// `MotionProcessor` moves each one to its serial motion queue, where the analyzer
+/// runs, and reports completed motion epochs and throttled live values to `nonisolated`
+/// methods that hop to the main queue in the same way. On the main queue an
+/// `EpochMerger` joins the level and the motion epoch of each index into one stored epoch.
+///
+/// Results are matched to their session by the pipeline or the motion processor that
+/// reported them. `stop()` waits for the motion queue and the pipeline to finish, but
+/// the last events and epochs they report then reach the main queue only after
+/// `stop()` has returned, so the stopped session is kept until they are stored.
 @MainActor
 final class SleepSessionController: ObservableObject {
     /// Seconds of audio the pre-roll ring buffer holds.
     private static let ringBufferDuration: TimeInterval = 10
     /// Minimum stream time between two live level updates (at most 5 per second).
     private static let levelUpdateInterval: TimeInterval = 0.2
+    /// Minimum sample time between two live motion updates (at most 5 per second).
+    private static let motionUpdateInterval: TimeInterval = 0.2
     /// Length of one level epoch in seconds.
     private static let epochDuration: TimeInterval = 30
     /// Minimum wall-clock time between two `topLabels` updates (at most 2 per second).
@@ -74,6 +83,13 @@ final class SleepSessionController: ObservableObject {
     @Published private(set) var isInFallAsleepDelay: Bool = false
     /// Raw top labels of the latest classifier window, for the Debug screen.
     @Published private(set) var topLabels: [RankedLabel] = []
+    /// Latest acceleration magnitude in g (about 1 at rest), updated at most 5 times per
+    /// second; 0 without motion capture.
+    @Published private(set) var liveMotionMagnitude: Double = 0
+    /// Resting movement level of the running night; nil until the calibration is complete.
+    @Published private(set) var motionBaseline: Double? = nil
+    /// `true` while the running night records motion.
+    @Published private(set) var isMotionActive: Bool = false
     /// Message for an alert (German); nil means no error. Views set it to nil to dismiss.
     @Published var errorMessage: String? = nil
 
@@ -84,10 +100,29 @@ final class SleepSessionController: ObservableObject {
         return state == .charging || state == .full
     }
 
-    /// A session together with the pipeline that records it.
-    private struct Recording {
+    /// The motion source of a session together with the processor that analyzes its samples.
+    private struct MotionCapture {
+        let source: MotionSource
+        let processor: MotionProcessor
+    }
+
+    /// A session together with what records it. A class, so that the merger of the
+    /// running and of the stopped session can be updated in place.
+    private final class Recording {
         let session: SleepSession
         let pipeline: AudioPipeline
+        /// nil when the night records no motion.
+        var motion: MotionCapture?
+        /// Joins the level and the motion epochs of this session. Expects no motion
+        /// until `startMotion` replaces it, which happens before the first epoch arrives.
+        var merger: EpochMerger
+
+        init(session: SleepSession, pipeline: AudioPipeline) {
+            self.session = session
+            self.pipeline = pipeline
+            self.motion = nil
+            self.merger = EpochMerger(expectsMotion: false)
+        }
     }
 
     private let repository: SessionRepository
@@ -96,11 +131,13 @@ final class SleepSessionController: ObservableObject {
     private let sourceFactory: (DispatchQueue) -> AudioSource
     private let classifierFactoryProvider: (LabelMapping) -> SoundClassifierFactory
     private let knownLabelsProvider: () throws -> [String]
+    /// Returns the motion source for a night, or nil to record without motion.
+    private let motionSourceFactory: () -> MotionSource?
 
     /// The running session; nil when idle.
     private var current: Recording?
-    /// The session `stop()` ended last, kept until the results its pipeline reported
-    /// while stopping have been stored.
+    /// The session `stop()` ended last, kept until the results its pipeline and its
+    /// motion processor reported while stopping and the rest of its merger have been stored.
     private var stopped: Recording?
     /// `true` while `start` waits for the permission and sets up the pipeline.
     private var isStarting = false
@@ -117,7 +154,8 @@ final class SleepSessionController: ObservableObject {
         settingsStore: SettingsStore,
         sourceFactory: @escaping (DispatchQueue) -> AudioSource,
         classifierFactoryProvider: @escaping (LabelMapping) -> SoundClassifierFactory,
-        knownLabelsProvider: @escaping () throws -> [String]
+        knownLabelsProvider: @escaping () throws -> [String],
+        motionSourceFactory: @escaping () -> MotionSource?
     ) {
         self.repository = repository
         self.fileStore = fileStore
@@ -125,6 +163,7 @@ final class SleepSessionController: ObservableObject {
         self.sourceFactory = sourceFactory
         self.classifierFactoryProvider = classifierFactoryProvider
         self.knownLabelsProvider = knownLabelsProvider
+        self.motionSourceFactory = motionSourceFactory
         UIDevice.current.isBatteryMonitoringEnabled = true
     }
 
@@ -138,7 +177,9 @@ final class SleepSessionController: ObservableObject {
     /// Starts a session. Throws `ControllerError` when a session is running or starting,
     /// for the test mode (not supported yet), without microphone access and when the
     /// classifier is unavailable; rethrows repository and audio start errors. If the
-    /// audio start fails, the new session is stored as ended unexpectedly.
+    /// audio start fails, the new session is stored as ended unexpectedly. A night
+    /// starts the motion capture after the audio; if that fails, only `errorMessage`
+    /// is set and the night records sound without motion.
     func start(mode: SessionMode) async throws {
         guard !isRunning, !isStarting else {
             throw ControllerError.alreadyRunning
@@ -190,7 +231,8 @@ final class SleepSessionController: ObservableObject {
         pipeline.delegate = self
 
         // Set before the start, so the pipeline's results are matched to this session.
-        current = Recording(session: session, pipeline: pipeline)
+        let recording = Recording(session: session, pipeline: pipeline)
+        current = recording
         gaps = []
         fallAsleepDelay = settings.fallAsleepDelay
         lastTopLabelsUpdate = nil
@@ -205,6 +247,13 @@ final class SleepSessionController: ObservableObject {
             throw error
         }
 
+        // No suspension point since `pipeline.start()`, so no epoch has reached the
+        // merger yet. The test mode (spec B8) records no motion and keeps the merger
+        // that expects none.
+        if case .night = mode {
+            startMotion(for: recording, settings: settings, sessionStart: now)
+        }
+
         startTimers()
         isTestRun = false
         startDate = now
@@ -212,8 +261,9 @@ final class SleepSessionController: ObservableObject {
         isRunning = true
     }
 
-    /// Ends the running session: stops the timers and the pipeline, stores the end date
-    /// and the final gaps and resets the live state. Does nothing when no session runs.
+    /// Ends the running session: stops the timers, the motion capture and the pipeline,
+    /// stores the end date and the final gaps and resets the live state. The last
+    /// epochs are stored one main-queue turn later. Does nothing when no session runs.
     func stop() {
         guard let recording = current else {
             return
@@ -222,6 +272,15 @@ final class SleepSessionController: ObservableObject {
         tickTimer = nil
         saveTimer?.invalidate()
         saveTimer = nil
+
+        // `finish()` returns when the motion queue has handled the samples queued before
+        // it, so the epochs they completed are already queued for the main queue; later
+        // samples are ignored. The motion queue never waits for the main queue.
+        var finalMotion: MotionEpoch?
+        if let motion = recording.motion {
+            motion.source.stop()
+            finalMotion = motion.processor.finish()
+        }
 
         // Returns when the pipeline has finished on its queue. The last events, the
         // partial epoch and a gap that ends now are reported during this call; their
@@ -239,10 +298,11 @@ final class SleepSessionController: ObservableObject {
         resetLiveState()
         isRunning = false
 
-        // Runs after the hops queued during `pipeline.stop()`: the main queue is serial.
-        let stoppedPipeline = recording.pipeline
+        // Runs after the hops queued before `processor.finish()` returned and during
+        // `pipeline.stop()`: the main queue is serial. It stores the last merged epochs,
+        // then releases the stopped session.
         DispatchQueue.main.async { [weak self] in
-            self?.releaseStopped(stoppedPipeline)
+            self?.finishStopped(recording, finalMotion: finalMotion)
         }
     }
 
@@ -293,32 +353,88 @@ final class SleepSessionController: ObservableObject {
         eventCounts = [:]
         isInFallAsleepDelay = false
         topLabels = []
+        liveMotionMagnitude = 0
+        motionBaseline = nil
+        isMotionActive = false
         gaps = []
         fallAsleepDelay = 0
         lastTopLabelsUpdate = nil
     }
 
-    private func releaseStopped(_ pipeline: AudioPipeline) {
-        guard stopped?.pipeline === pipeline else {
-            return
+    /// Starts the motion capture of `recording` when the factory returns an available
+    /// source, and gives the recording a merger that expects motion only then. A failed
+    /// start sets `errorMessage`; the night then records sound without motion.
+    private func startMotion(for recording: Recording, settings: AppSettings, sessionStart: Date) {
+        var capture: MotionCapture?
+        if let source = motionSourceFactory(), source.isAvailable {
+            let processor = MotionProcessor(
+                config: MotionConfig(settings: settings),
+                liveUpdateInterval: SleepSessionController.motionUpdateInterval
+            )
+            // Both set before the start: they are read on the source's queue and on the
+            // motion queue.
+            processor.delegate = self
+            source.delegate = processor
+            do {
+                try source.start(referenceDate: sessionStart)
+                capture = MotionCapture(source: source, processor: processor)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
-        stopped = nil
+        recording.motion = capture
+        recording.merger = EpochMerger(expectsMotion: capture != nil)
+        isMotionActive = capture != nil
+    }
+
+    /// Stores what the merger of the stopped `recording` still holds and releases it.
+    /// Runs after every result its motion processor and its pipeline reported, so only
+    /// the motion epoch that was in progress at the stop is still to be merged.
+    private func finishStopped(_ recording: Recording, finalMotion: MotionEpoch?) {
+        if let finalMotion = finalMotion {
+            store(recording.merger.add(motion: finalMotion), for: recording.session)
+        }
+        store(recording.merger.finish(), for: recording.session)
+        if stopped === recording {
+            stopped = nil
+        }
+    }
+
+    /// The recording `pipeline` belongs to: the running one, or the one `stop()` just ended.
+    private func recording(for pipeline: AudioPipeline) -> Recording? {
+        if let current = current, current.pipeline === pipeline {
+            return current
+        }
+        if let stopped = stopped, stopped.pipeline === pipeline {
+            return stopped
+        }
+        return nil
+    }
+
+    /// The recording `processor` belongs to: the running one, or the one `stop()` just ended.
+    private func recording(for processor: MotionProcessor) -> Recording? {
+        if let current = current, current.motion?.processor === processor {
+            return current
+        }
+        if let stopped = stopped, stopped.motion?.processor === processor {
+            return stopped
+        }
+        return nil
     }
 
     /// The session `pipeline` records: the running one, or the one `stop()` just ended.
     private func recordedSession(for pipeline: AudioPipeline) -> SleepSession? {
-        if let current = current, current.pipeline === pipeline {
-            return current.session
-        }
-        if let stopped = stopped, stopped.pipeline === pipeline {
-            return stopped.session
-        }
-        return nil
+        recording(for: pipeline)?.session
     }
 
     /// `true` when `pipeline` records the running session. Live values come only from it.
     private func isCurrent(_ pipeline: AudioPipeline) -> Bool {
         current?.pipeline === pipeline
+    }
+
+    /// `true` when `processor` analyzes the running session. Live values come only from it.
+    private func isCurrent(_ processor: MotionProcessor) -> Bool {
+        current?.motion?.processor === processor
     }
 
     private func reportStorageError(_ error: Error) {
@@ -335,20 +451,27 @@ final class SleepSessionController: ObservableObject {
     }
 
     private func handleEpoch(_ epoch: LevelEpoch, from pipeline: AudioPipeline) {
-        guard let session = recordedSession(for: pipeline) else {
+        guard let owner = recording(for: pipeline) else {
             return
         }
-        do {
-            _ = try repository.addEpoch(
-                to: session,
-                timestamp: session.startDate.addingTimeInterval(epoch.start),
-                averageDecibels: epoch.averageDecibels,
-                peakDecibels: epoch.peakDecibels,
-                motionIntensity: 0,
-                isRestless: false
-            )
-        } catch {
-            reportStorageError(error)
+        store(owner.merger.add(level: epoch), for: owner.session)
+    }
+
+    /// Stores merged epochs; each timestamp is the session start plus the epoch start.
+    private func store(_ records: [EpochRecord], for session: SleepSession) {
+        for record in records {
+            do {
+                _ = try repository.addEpoch(
+                    to: session,
+                    timestamp: session.startDate.addingTimeInterval(record.start),
+                    averageDecibels: record.averageDecibels,
+                    peakDecibels: record.peakDecibels,
+                    motionIntensity: record.motionIntensity,
+                    isRestless: record.isRestless
+                )
+            } catch {
+                reportStorageError(error)
+            }
         }
     }
 
@@ -416,6 +539,28 @@ final class SleepSessionController: ObservableObject {
         }
         stop()
     }
+
+    // MARK: - Motion results (main actor)
+
+    private func handleMotionEpochs(_ epochs: [MotionEpoch], from processor: MotionProcessor) {
+        guard let owner = recording(for: processor) else {
+            return
+        }
+        for epoch in epochs {
+            store(owner.merger.add(motion: epoch), for: owner.session)
+        }
+    }
+
+    private func handleMotionUpdate(_ magnitude: Double, baseline: Double?, from processor: MotionProcessor) {
+        guard isCurrent(processor) else {
+            return
+        }
+        liveMotionMagnitude = magnitude
+        // The baseline changes once per night; an unchanged value is not republished.
+        if motionBaseline != baseline {
+            motionBaseline = baseline
+        }
+    }
 }
 
 // MARK: - AudioPipelineDelegate
@@ -469,5 +614,109 @@ extension SleepSessionController: AudioPipelineDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.handlePipelineFinished(pipeline)
         }
+    }
+}
+
+// MARK: - MotionProcessorDelegate
+
+/// Called on the motion queue. Each method only moves its arguments to the main queue;
+/// all state is touched in the main-actor handlers above.
+extension SleepSessionController: MotionProcessorDelegate {
+    fileprivate nonisolated func motionProcessor(_ processor: MotionProcessor, didCompleteEpochs epochs: [MotionEpoch]) {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleMotionEpochs(epochs, from: processor)
+        }
+    }
+
+    fileprivate nonisolated func motionProcessor(
+        _ processor: MotionProcessor,
+        didUpdateMagnitude magnitude: Double,
+        baseline: Double?
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleMotionUpdate(magnitude, baseline: baseline, from: processor)
+        }
+    }
+}
+
+// MARK: - Motion processing
+
+/// Receives the results of a `MotionProcessor`, on its motion queue.
+private protocol MotionProcessorDelegate: AnyObject {
+    /// The motion epochs one sample completed, oldest first.
+    func motionProcessor(_ processor: MotionProcessor, didCompleteEpochs epochs: [MotionEpoch])
+    /// The latest magnitude in g and the baseline (nil while calibrating), at most once
+    /// per live update interval of sample time.
+    func motionProcessor(_ processor: MotionProcessor, didUpdateMagnitude magnitude: Double, baseline: Double?)
+}
+
+/// Runs the motion analysis of one session on its own serial queue.
+///
+/// It is the delegate of the session's motion source: each sample is moved from the
+/// source's queue to `queue`, and the analyzer and the live-update state are touched
+/// only there. The results go to `delegate`, called on `queue`.
+private final class MotionProcessor: MotionSourceDelegate {
+    /// Set before the source starts; read on `queue`.
+    weak var delegate: MotionProcessorDelegate?
+
+    private let queue = DispatchQueue(label: "sleeptracker.motion", qos: .utility)
+    private let liveUpdateInterval: TimeInterval
+
+    // Touched only on `queue`.
+    private var analyzer: MotionAnalyzer
+    private var lastLiveUpdate: TimeInterval?
+    private var isFinished = false
+
+    init(config: MotionConfig, liveUpdateInterval: TimeInterval) {
+        self.analyzer = MotionAnalyzer(config: config)
+        self.liveUpdateInterval = liveUpdateInterval
+    }
+
+    /// Called on the source's queue.
+    func motionSource(_ source: MotionSource, didSample magnitude: Double, at time: TimeInterval) {
+        queue.async { [weak self] in
+            self?.process(magnitude, at: time)
+        }
+    }
+
+    /// Ends the analysis and returns the epoch that was in progress, if any. Waits until
+    /// `queue` has handled the samples queued before, so the epochs they completed have
+    /// been reported; samples that arrive later are ignored. Must not be called on `queue`.
+    func finish() -> MotionEpoch? {
+        return queue.sync { () -> MotionEpoch? in
+            guard !self.isFinished else {
+                return nil
+            }
+            self.isFinished = true
+            return self.analyzer.finish()
+        }
+    }
+
+    // MARK: - Queue
+
+    private func process(_ magnitude: Double, at time: TimeInterval) {
+        guard !isFinished else {
+            return
+        }
+        let epochs = analyzer.add(magnitude: magnitude, at: time)
+        if !epochs.isEmpty {
+            delegate?.motionProcessor(self, didCompleteEpochs: epochs)
+        }
+        if shouldUpdateLive(at: time) {
+            delegate?.motionProcessor(self, didUpdateMagnitude: magnitude, baseline: analyzer.baseline)
+        }
+    }
+
+    /// At most one live update per `liveUpdateInterval` of sample time. A time that
+    /// jumps backwards (a wall-clock change) starts a new interval.
+    private func shouldUpdateLive(at time: TimeInterval) -> Bool {
+        guard time.isFinite else {
+            return false
+        }
+        if let last = lastLiveUpdate, time >= last, time - last < liveUpdateInterval {
+            return false
+        }
+        lastLiveUpdate = time
+        return true
     }
 }

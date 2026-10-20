@@ -42,7 +42,8 @@ final class AppDependencies: ObservableObject {
             settingsStore: settingsStore,
             sourceFactory: { MicrophoneAudioSource(callbackQueue: $0) },
             classifierFactoryProvider: { SoundClassifierService.makeFactory(mapping: $0) },
-            knownLabelsProvider: { try SoundClassifierService.knownLabels() }
+            knownLabelsProvider: { try SoundClassifierService.knownLabels() },
+            motionSourceFactory: { CoreMotionSource() }
         )
         let clipPlayer = ClipPlayer(fileStore: fileStore)
 
