@@ -67,7 +67,9 @@ final class NightStatisticsTests: XCTestCase {
             EpochSummary(timestamp: t0.addingTimeInterval(Double(index) * 30), isRestless: restless)
         }
         // Handed over in scrambled order: compute must sort by timestamp itself.
-        let scrambledIndices = [7, 2, 9, 0, 5, 3, 8, 1, 6, 4]
+        // Read as given, this order is T,F,T,F,T,F,F,T,T,T (4 runs); only the sorted
+        // order has 3 runs, so a missing sort inside compute fails this test.
+        let scrambledIndices = [1, 3, 2, 0, 4, 5, 6, 7, 8, 9]
         let scrambled = scrambledIndices.map { ordered[$0] }
 
         let stats = NightStatistics.compute(
@@ -111,6 +113,7 @@ final class NightStatisticsTests: XCTestCase {
         )
 
         XCTAssertEqual(stats.duration, 0, accuracy: 0.0001)
+        XCTAssertEqual(stats.snoringDuration, 10, accuracy: 0.0001)
         XCTAssertEqual(stats.snoringPercentage, 0, accuracy: 0.0001)
         XCTAssertEqual(stats.restlessPercentage, 0, accuracy: 0.0001)
         XCTAssertFalse(stats.snoringPercentage.isNaN)
