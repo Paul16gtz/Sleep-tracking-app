@@ -430,12 +430,6 @@ mit `project.yml` überein.
 - [ ] **Step 3: Commit** `Complete phase 2: README, unverified items and verification`
 
 ---
-
-## Self-Review-Notizen
-
-- Spec-Abdeckung: Funktionen 1–9 → Tasks 15, 10/12, 11, 6, 7/8/10, 4, 18/19, 9, 16/20/21/22/23. CI → 24. README → 17/25. Dateischutz → 9 (FileStore) und 14 (Store-Datei). Inkrementelles Speichern → 14 (Insert + save je Ereignis/Epoche, zusätzlich 120-s-Timer). Stale-Sessions → 9/14. Testmodus → 23. Label-Mapping zentral → 5. Einschlafverzögerung → 6/12/14.
-- Typkonsistenz: `ClipWriting.prepare(sampleRate:)` ist in Task 10 definiert; die Pipeline (Task 12) ruft es in `didBeginSegmentWith` auf. `AudioPipeline.Config.sessionStart: Date` ist in Task 12 definiert. `DetectorConfig(settings:countingStart:)` wird von der Pipeline genutzt. `SessionRepository.schema` wird von `AppDependencies` und den Tests genutzt.
-- Review Focus: 1 → Task 4, 2 → Task 4 und 6, 3 → Task 13, 4 → Task 12, 5 → Task 2 und 9.
 ```
 
 #### Dispatch-Prompt für den Implementer (Modell: Sonnet)
