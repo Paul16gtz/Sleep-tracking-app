@@ -17,7 +17,6 @@ enum ControllerError: LocalizedError {
     case microphoneDenied
     /// The built-in sound classifier could not be loaded; carries the underlying message.
     case classifierUnavailable(String)
-    case unsupported
 
     var errorDescription: String? {
         switch self {
@@ -27,8 +26,6 @@ enum ControllerError: LocalizedError {
             return "Kein Zugriff auf das Mikrofon. Bitte in den Einstellungen erlauben."
         case .classifierUnavailable(let message):
             return "Die Geräuscherkennung ist nicht verfügbar: \(message)"
-        case .unsupported:
-            return "Dieser Modus wird noch nicht unterstützt."
         }
     }
 }
@@ -36,6 +33,11 @@ enum ControllerError: LocalizedError {
 /// Orchestrates one night: starts the audio pipeline and the motion capture, stores
 /// their epochs, events and gaps as they arrive, publishes the live state for the UI
 /// and finishes the session.
+///
+/// Test mode (spec B8): the same pipeline reads an audio file instead of the microphone,
+/// without fall-asleep delay and without motion, into a session marked `isTest`. The
+/// file runs faster than real time, so a test session ends no earlier than the latest
+/// stream time its pipeline reported.
 ///
 /// Threading (spec B4): the controller and every repository call run on the main
 /// actor. The pipeline calls its delegate on its analysis queue; the delegate methods
@@ -116,6 +118,9 @@ final class SleepSessionController: ObservableObject {
         /// Joins the level and the motion epochs of this session. Expects no motion
         /// until `startMotion` replaces it, which happens before the first epoch arrives.
         var merger: EpochMerger
+        /// Latest stream time in seconds since session start that the pipeline reported
+        /// (window ends, epoch starts, event ends). A test session ends no earlier.
+        var latestStreamTime: TimeInterval = 0
 
         init(session: SleepSession, pipeline: AudioPipeline) {
             self.session = session
@@ -129,6 +134,8 @@ final class SleepSessionController: ObservableObject {
     private let fileStore: FileStore
     private let settingsStore: SettingsStore
     private let sourceFactory: (DispatchQueue) -> AudioSource
+    /// Returns the source that reads a test file, calling back on the given queue.
+    private let fileSourceFactory: (URL, DispatchQueue) -> AudioSource
     private let classifierFactoryProvider: (LabelMapping) -> SoundClassifierFactory
     private let knownLabelsProvider: () throws -> [String]
     /// Returns the motion source for a night, or nil to record without motion.
@@ -153,6 +160,7 @@ final class SleepSessionController: ObservableObject {
         fileStore: FileStore,
         settingsStore: SettingsStore,
         sourceFactory: @escaping (DispatchQueue) -> AudioSource,
+        fileSourceFactory: @escaping (URL, DispatchQueue) -> AudioSource,
         classifierFactoryProvider: @escaping (LabelMapping) -> SoundClassifierFactory,
         knownLabelsProvider: @escaping () throws -> [String],
         motionSourceFactory: @escaping () -> MotionSource?
@@ -161,6 +169,7 @@ final class SleepSessionController: ObservableObject {
         self.fileStore = fileStore
         self.settingsStore = settingsStore
         self.sourceFactory = sourceFactory
+        self.fileSourceFactory = fileSourceFactory
         self.classifierFactoryProvider = classifierFactoryProvider
         self.knownLabelsProvider = knownLabelsProvider
         self.motionSourceFactory = motionSourceFactory
@@ -175,25 +184,36 @@ final class SleepSessionController: ObservableObject {
     // MARK: - Start and stop
 
     /// Starts a session. Throws `ControllerError` when a session is running or starting,
-    /// for the test mode (not supported yet), without microphone access and when the
-    /// classifier is unavailable; rethrows repository and audio start errors. If the
-    /// audio start fails, the new session is stored as ended unexpectedly. A night
-    /// starts the motion capture after the audio; if that fails, only `errorMessage`
-    /// is set and the night records sound without motion.
+    /// for a night without microphone access and when the classifier is unavailable;
+    /// rethrows repository and audio start errors (for the test mode also a file that
+    /// cannot be opened). If the audio start fails, the new session is stored as ended
+    /// unexpectedly. A night starts the motion capture after the audio; if that fails,
+    /// only `errorMessage` is set and the night records sound without motion. The test
+    /// mode (spec B8) reads the file at `fileURL` without asking for the microphone,
+    /// counts events from its first second (fall-asleep delay 0), records no motion and
+    /// stores a session marked `isTest`; it stops by itself at the end of the file.
     func start(mode: SessionMode) async throws {
         guard !isRunning, !isStarting else {
             throw ControllerError.alreadyRunning
-        }
-        guard case .night = mode else {
-            throw ControllerError.unsupported
         }
         // `start` suspends while it waits for the permission; a second call meanwhile
         // must not start another session.
         isStarting = true
         defer { isStarting = false }
 
-        guard await SleepSessionController.requestMicrophonePermission() else {
-            throw ControllerError.microphoneDenied
+        let testFileURL: URL?
+        switch mode {
+        case .night:
+            testFileURL = nil
+        case .test(let fileURL):
+            testFileURL = fileURL
+        }
+        let isTest = testFileURL != nil
+
+        if !isTest {
+            guard await SleepSessionController.requestMicrophonePermission() else {
+                throw ControllerError.microphoneDenied
+            }
         }
 
         let labels: [String]
@@ -204,12 +224,21 @@ final class SleepSessionController: ObservableObject {
         }
         let mapping = LabelMapping(knownLabels: labels)
 
-        let settings = settingsStore.settings
+        var settings = settingsStore.settings
+        if isTest {
+            // The file is analyzed from its first second; the snapshot stores the 0.
+            settings.fallAsleepDelay = 0
+        }
         let now = Date()
-        let session = try repository.createSession(startDate: now, settings: settings, isTest: false)
+        let session = try repository.createSession(startDate: now, settings: settings, isTest: isTest)
 
         let queue = DispatchQueue(label: "sleeptracker.analysis", qos: .userInitiated)
-        let source = sourceFactory(queue)
+        let source: AudioSource
+        if let testFileURL = testFileURL {
+            source = fileSourceFactory(testFileURL, queue)
+        } else {
+            source = sourceFactory(queue)
+        }
         // The pipeline passes the sample rate with `prepare(sampleRate:)` at every segment begin.
         let clipWriter = ClipWriter(fileStore: fileStore, sessionID: session.id)
         let config = AudioPipeline.Config(
@@ -248,14 +277,15 @@ final class SleepSessionController: ObservableObject {
         }
 
         // No suspension point since `pipeline.start()`, so no epoch has reached the
-        // merger yet. The test mode (spec B8) records no motion and keeps the merger
-        // that expects none.
+        // merger yet. The test mode (spec B8) records no motion: the motion source
+        // factory is not called, the merger that expects none is kept and
+        // `isMotionActive` stays false (as reset by the last stop).
         if case .night = mode {
             startMotion(for: recording, settings: settings, sessionStart: now)
         }
 
         startTimers()
-        isTestRun = false
+        isTestRun = isTest
         startDate = now
         tick()
         isRunning = true
@@ -291,7 +321,7 @@ final class SleepSessionController: ObservableObject {
         current = nil
         stopped = recording
         do {
-            try repository.finishSession(recording.session, endDate: Date(), status: .ended, gaps: finalGaps)
+            try repository.finishSession(recording.session, endDate: endDate(of: recording), status: .ended, gaps: finalGaps)
         } catch {
             reportStorageError(error)
         }
@@ -395,8 +425,40 @@ final class SleepSessionController: ObservableObject {
             store(recording.merger.add(motion: finalMotion), for: recording.session)
         }
         store(recording.merger.finish(), for: recording.session)
+        extendTestEndDateIfNeeded(of: recording)
         if stopped === recording {
             stopped = nil
+        }
+    }
+
+    /// The end date `stop()` stores: now. A test session runs faster than real time,
+    /// so it ends no earlier than the latest stream time its pipeline reported; its
+    /// events and epochs then lie inside the night's timeline.
+    private func endDate(of recording: Recording) -> Date {
+        let now = Date()
+        guard recording.session.isTest else {
+            return now
+        }
+        return max(now, recording.session.startDate.addingTimeInterval(recording.latestStreamTime))
+    }
+
+    /// A cancelled test run reports its last events and its partial epoch only after
+    /// `stop()` stored the end date; when they lie beyond it, the end date moves to them.
+    /// A run that reached the end of the file was stopped after all of them, so nothing
+    /// changes then. Nights are not touched.
+    private func extendTestEndDateIfNeeded(of recording: Recording) {
+        let session = recording.session
+        guard session.isTest, let storedEnd = session.endDate else {
+            return
+        }
+        let dataEnd = session.startDate.addingTimeInterval(recording.latestStreamTime)
+        guard dataEnd > storedEnd else {
+            return
+        }
+        do {
+            try repository.finishSession(session, endDate: dataEnd, status: session.status, gaps: session.interruptionGaps)
+        } catch {
+            reportStorageError(error)
         }
     }
 
@@ -454,7 +516,16 @@ final class SleepSessionController: ObservableObject {
         guard let owner = recording(for: pipeline) else {
             return
         }
+        noteStreamTime(epoch.start, of: owner)
         store(owner.merger.add(level: epoch), for: owner.session)
+    }
+
+    /// Remembers the latest stream time `owner`'s pipeline reported.
+    private func noteStreamTime(_ time: TimeInterval, of owner: Recording) {
+        guard time.isFinite else {
+            return
+        }
+        owner.latestStreamTime = max(owner.latestStreamTime, time)
     }
 
     /// Stores merged epochs; each timestamp is the session start plus the epoch start.
@@ -483,9 +554,11 @@ final class SleepSessionController: ObservableObject {
     }
 
     private func handleFinalizedEvent(_ event: DetectedEvent, clipRelativePath: String?, from pipeline: AudioPipeline) {
-        guard let session = recordedSession(for: pipeline) else {
+        guard let owner = recording(for: pipeline) else {
             return
         }
+        let session = owner.session
+        noteStreamTime(event.end, of: owner)
         do {
             _ = try repository.addEvent(
                 to: session,
@@ -501,7 +574,11 @@ final class SleepSessionController: ObservableObject {
         }
     }
 
-    private func handleTopLabels(_ labels: [RankedLabel], from pipeline: AudioPipeline) {
+    /// `time` is the end of the window in seconds since session start.
+    private func handleTopLabels(_ labels: [RankedLabel], at time: TimeInterval, from pipeline: AudioPipeline) {
+        if let owner = recording(for: pipeline) {
+            noteStreamTime(time, of: owner)
+        }
         guard isCurrent(pipeline) else {
             return
         }
@@ -594,7 +671,7 @@ extension SleepSessionController: AudioPipelineDelegate {
 
     nonisolated func pipeline(_ pipeline: AudioPipeline, didProduceTopLabels labels: [RankedLabel], at time: TimeInterval) {
         DispatchQueue.main.async { [weak self] in
-            self?.handleTopLabels(labels, from: pipeline)
+            self?.handleTopLabels(labels, at: time, from: pipeline)
         }
     }
 

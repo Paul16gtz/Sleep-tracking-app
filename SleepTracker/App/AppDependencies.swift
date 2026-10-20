@@ -41,6 +41,7 @@ final class AppDependencies: ObservableObject {
             fileStore: fileStore,
             settingsStore: settingsStore,
             sourceFactory: { MicrophoneAudioSource(callbackQueue: $0) },
+            fileSourceFactory: { FileAudioSource(fileURL: $0, callbackQueue: $1) },
             classifierFactoryProvider: { SoundClassifierService.makeFactory(mapping: $0) },
             knownLabelsProvider: { try SoundClassifierService.knownLabels() },
             motionSourceFactory: { CoreMotionSource() }

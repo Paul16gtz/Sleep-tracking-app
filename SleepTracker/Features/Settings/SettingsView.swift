@@ -199,7 +199,7 @@ struct SettingsView: View {
                     settingsStore.resetToDefaults()
                 }
                 NavigationLink("Debug") {
-                    Text("Debug folgt")
+                    DebugView()
                 }
             }
             .listRowBackground(Theme.card)
