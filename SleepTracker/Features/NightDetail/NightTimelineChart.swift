@@ -1,13 +1,17 @@
 import SwiftUI
 import Charts
 
-/// One loudness sample of the night timeline, built from an `EpochSample`.
+/// One epoch of the night timeline (loudness and motion), built from an `EpochSample`.
 struct TimelinePoint: Identifiable {
     /// Position in the time-sorted epoch list.
     let id: Int
+    /// Start of the epoch.
     let time: Date
     /// Average level of the epoch in dBFS, already clamped to the chart floor.
     let decibels: Double
+    /// Motion intensity of the epoch; 0 when no motion was recorded.
+    let motion: Double
+    let isRestless: Bool
 }
 
 /// One detected event on the night timeline, built from a `SoundEvent`.
@@ -23,20 +27,25 @@ struct TimelineEvent: Identifiable {
     static let minimumVisibleDuration: TimeInterval = 20
 }
 
-/// Two charts over the same time axis: the loudness line of the epochs and one row of
-/// colored bars per event type. Motion is not recorded yet, so there is no motion chart.
+/// Up to three charts over the same time axis: the loudness line of the epochs, one motion
+/// bar per epoch (only for a night with motion data) and one row of colored bars per event type.
 struct NightTimelineChart: View {
     /// Epochs sorted by time.
     let points: [TimelinePoint]
     /// Events sorted by start.
     let events: [TimelineEvent]
-    /// Session start to end; both charts share it as their x domain.
+    /// Session start to end; all charts share it as their x domain.
     let range: ClosedRange<Date>
+    /// Shows the motion chart; false for a night without motion data (no sensor).
+    let showsMotion: Bool
 
     /// Lowest level the loudness chart shows; quieter epochs sit on this line.
     static let decibelFloor: Double = -80
 
     private static let loudnessChartHeight: CGFloat = 120
+    private static let motionChartHeight: CGFloat = 80
+    /// Width of one motion bar: one epoch, starting at its timestamp.
+    private static let motionBarDuration: TimeInterval = 30
     private static let eventRowHeight: CGFloat = 24
     private static let eventChartPadding: CGFloat = 16
     private static let minimumEventChartHeight: CGFloat = 40
@@ -51,6 +60,11 @@ struct NightTimelineChart: View {
             VStack(alignment: .leading, spacing: 12) {
                 caption("Lautstärke (dBFS)")
                 loudnessChart
+                if showsMotion {
+                    caption("Bewegung")
+                    motionChart
+                    motionLegend
+                }
                 caption("Ereignisse")
                 if events.isEmpty {
                     Text("Keine Ereignisse")
@@ -75,6 +89,21 @@ struct NightTimelineChart: View {
         .frame(height: NightTimelineChart.loudnessChartHeight)
     }
 
+    private var motionChart: some View {
+        Chart(points) { point in
+            // One bar over the 30 s of the epoch; the style sits on the mark as in the loudness chart.
+            RectangleMark(
+                xStart: .value("Start", point.time),
+                xEnd: .value("Ende", point.time.addingTimeInterval(NightTimelineChart.motionBarDuration)),
+                yStart: .value("Bewegung", 0.0),
+                yEnd: .value("Bewegung", point.motion)
+            )
+            .foregroundStyle(point.isRestless ? Color.orange : Color.gray)
+        }
+        .sharedTimeAxis(range: range, labelStride: axisStride)
+        .frame(height: NightTimelineChart.motionChartHeight)
+    }
+
     private var eventChart: some View {
         Chart {
             ForEach(events) { event in
@@ -95,19 +124,32 @@ struct NightTimelineChart: View {
     private var legend: some View {
         HStack(spacing: 12) {
             ForEach(presentTypes) { type in
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Theme.color(for: type))
-                        .frame(width: 10, height: 10)
-                    Text(type.germanName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                legendEntry(type.germanName, color: Theme.color(for: type))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .minimumScaleFactor(0.8)
+    }
+
+    private var motionLegend: some View {
+        HStack(spacing: 12) {
+            legendEntry("unruhig", color: .orange)
+            legendEntry("ruhig", color: .gray)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A colored dot with its caption-size name.
+    private func legendEntry(_ text: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 
     private func caption(_ text: String) -> some View {
@@ -146,7 +188,7 @@ private struct TimeAxisStride {
 }
 
 private extension View {
-    /// The x domain and axis both charts share, so their time columns line up.
+    /// The x domain and axis all charts share, so their time columns line up.
     func sharedTimeAxis(range: ClosedRange<Date>, labelStride: TimeAxisStride) -> some View {
         self
             .chartXScale(domain: range)

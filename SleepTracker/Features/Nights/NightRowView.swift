@@ -19,7 +19,7 @@ struct NightRowView: View {
                     StatusBadge(text: SessionStatus.endedUnexpectedly.germanName, color: .orange)
                 }
             }
-            Text(NightRowView.summary(of: stats))
+            Text(NightRowView.summary(of: stats, hasMotionData: session.hasMotionData))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -27,10 +27,10 @@ struct NightRowView: View {
     }
 
     /// "7 h 32 min · Schnarchen 23 min · Sprechen 4× · Unruhe 12 %".
-    private static func summary(of stats: NightStatistics) -> String {
-        // As in the detail view: without any restless epoch the index shows "–". Phase 1
-        // records no motion, so every epoch is calm and "0 %" would claim a measured calm night.
-        let restlessness = stats.restlessEpochCount > 0 ? Formatters.percent(stats.restlessPercentage) : "–"
+    private static func summary(of stats: NightStatistics, hasMotionData: Bool) -> String {
+        // As in the detail view: a night without motion data (no sensor) shows "–", because
+        // its epochs are all calm and "0 %" would claim a measured calm night.
+        let restlessness = hasMotionData ? Formatters.percent(stats.restlessPercentage) : "–"
         return [
             Formatters.duration(stats.duration),
             "Schnarchen \(Formatters.minutes(stats.snoringDuration))",

@@ -16,11 +16,24 @@ struct NightDetailView: View {
     @State private var exportURL: URL? = nil
 
     var body: some View {
+        // Checked before any other property of the session is read: "Alle Daten löschen" in
+        // the settings tab can delete the night while this view is still pushed in the
+        // "Nächte" tab, and reading a deleted model may trap.
+        if NightDetailView.isDeleted(session) {
+            deletedPlaceholder
+        } else {
+            nightContent
+        }
+    }
+
+    @ViewBuilder
+    private var nightContent: some View {
         let stats = session.statistics()
         let events = NightDetailView.chronological(session.events)
+        let hasMotionData = session.hasMotionData
         List {
-            summarySection(stats)
-            timelineSection(events)
+            summarySection(stats, hasMotionData: hasMotionData)
+            timelineSection(events, showsMotion: hasMotionData)
             eventsSection(events)
         }
         .scrollContentBackground(.hidden)
@@ -56,7 +69,17 @@ struct NightDetailView: View {
         }
     }
 
-    private func summarySection(_ stats: NightStatistics) -> some View {
+    private var deletedPlaceholder: some View {
+        ContentUnavailableView(
+            "Nacht gelöscht",
+            systemImage: "trash",
+            description: Text("Diese Nacht wurde gelöscht.")
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
+    }
+
+    private func summarySection(_ stats: NightStatistics, hasMotionData: Bool) -> some View {
         Section("Zusammenfassung") {
             Group {
                 LabeledContent("Gesamtdauer", value: Formatters.duration(stats.duration))
@@ -68,19 +91,23 @@ struct NightDetailView: View {
                 if stats.coughCount > 0 {
                     LabeledContent("Husten", value: String(stats.coughCount))
                 }
-                LabeledContent("Unruhe-Index", value: NightDetailView.restlessnessText(stats))
+                LabeledContent(
+                    "Unruhe-Index",
+                    value: NightDetailView.restlessnessText(stats, hasMotionData: hasMotionData)
+                )
                 LabeledContent("Unterbrechungen", value: String(stats.interruptionCount))
             }
             .listRowBackground(Theme.card)
         }
     }
 
-    private func timelineSection(_ events: [SoundEvent]) -> some View {
+    private func timelineSection(_ events: [SoundEvent], showsMotion: Bool) -> some View {
         Section("Zeitachse") {
             NightTimelineChart(
                 points: NightDetailView.timelinePoints(session.epochs),
                 events: NightDetailView.timelineEvents(events),
-                range: NightDetailView.timelineRange(of: session)
+                range: NightDetailView.timelineRange(of: session),
+                showsMotion: showsMotion
             )
             .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
             .listRowBackground(Theme.card)
@@ -142,6 +169,10 @@ struct NightDetailView: View {
     /// button. A failure leaves no URL (the toolbar keeps its inactive icon), so a stale
     /// file is never offered.
     private func refreshExport() {
+        guard !NightDetailView.isDeleted(session) else {
+            exportURL = nil
+            return
+        }
         let csv = CSVExporter.makeCSV(
             events: NightDetailView.exportEvents(session.events),
             epochs: NightDetailView.exportEpochs(session.epochs)
@@ -154,13 +185,23 @@ struct NightDetailView: View {
 
     /// `session.events` is unordered. Events that start together (two types detected in
     /// the same window) are ordered by type, so rows keep their order between updates.
+    /// Deleted events are skipped before any of their other properties is read, so no
+    /// row, bar or export line is built from one.
     private static func chronological(_ events: [SoundEvent]) -> [SoundEvent] {
-        events.sorted { lhs, rhs in
-            if lhs.startDate != rhs.startDate {
-                return lhs.startDate < rhs.startDate
+        events
+            .filter { !isDeleted($0) }
+            .sorted { lhs, rhs in
+                if lhs.startDate != rhs.startDate {
+                    return lhs.startDate < rhs.startDate
+                }
+                return lhs.typeRaw < rhs.typeRaw
             }
-            return lhs.typeRaw < rhs.typeRaw
-        }
+    }
+
+    /// A model deleted elsewhere: its context is gone after the save, and before the save
+    /// it is marked as deleted. None of its stored properties may be read any more.
+    private static func isDeleted(_ model: some PersistentModel) -> Bool {
+        model.modelContext == nil || model.isDeleted
     }
 
     /// Export rows in chronological order (the exporter sorts again).
@@ -194,6 +235,7 @@ struct NightDetailView: View {
 
     /// `session.epochs` is unordered. Levels below the chart floor are drawn on it, so a
     /// silent epoch (`LevelMeter.silenceFloor`) does not squash the rest of the line.
+    /// Motion intensity and the restless flag are taken over unchanged.
     private static func timelinePoints(_ epochs: [EpochSample]) -> [TimelinePoint] {
         epochs
             .sorted { $0.timestamp < $1.timestamp }
@@ -202,7 +244,9 @@ struct NightDetailView: View {
                 TimelinePoint(
                     id: index,
                     time: epoch.timestamp,
-                    decibels: max(NightTimelineChart.decibelFloor, epoch.averageDecibels)
+                    decibels: max(NightTimelineChart.decibelFloor, epoch.averageDecibels),
+                    motion: epoch.motionIntensity,
+                    isRestless: epoch.isRestless
                 )
             }
     }
@@ -227,10 +271,10 @@ struct NightDetailView: View {
         return session.startDate ... end
     }
 
-    /// Phase 1 records no motion, so no epoch is marked restless and the index shows "–";
-    /// otherwise "12 % unruhig, 4 Phasen".
-    private static func restlessnessText(_ stats: NightStatistics) -> String {
-        guard stats.restlessEpochCount > 0 else {
+    /// A night without motion data (no sensor) shows "–", because all its epochs are calm
+    /// and "0 % unruhig" would claim a measured calm night; otherwise "12 % unruhig, 4 Phasen".
+    private static func restlessnessText(_ stats: NightStatistics, hasMotionData: Bool) -> String {
+        guard hasMotionData else {
             return "–"
         }
         let phases = stats.restlessPhaseCount == 1 ? "1 Phase" : "\(stats.restlessPhaseCount) Phasen"

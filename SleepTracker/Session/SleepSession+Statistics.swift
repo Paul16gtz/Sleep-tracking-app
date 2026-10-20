@@ -22,4 +22,12 @@ extension SleepSession {
             gaps: interruptionGaps
         )
     }
+
+    /// True when at least one epoch has a motion intensity above zero, i.e. motion was
+    /// recorded. Without a motion sensor (simulator, unavailable accelerometer) every epoch
+    /// stores intensity 0 and is never restless, so a restlessness of "0 %" would claim a
+    /// measured calm night; the UI shows "–" instead.
+    var hasMotionData: Bool {
+        epochs.contains { $0.motionIntensity > 0 }
+    }
 }
