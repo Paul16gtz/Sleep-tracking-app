@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Detail of one night: the summary, the timeline chart and the chronological event
 /// list with clip playback and single-event delete. All sections are rows of a `List`,
-/// so the event rows can offer swipe actions.
+/// so the event rows can offer swipe actions. The toolbar shares the night as a CSV file.
 struct NightDetailView: View {
     let session: SleepSession
 
@@ -12,6 +12,8 @@ struct NightDetailView: View {
 
     /// Message for a failed event delete (German); nil means no error.
     @State private var deleteErrorMessage: String? = nil
+    /// Temporary CSV file of this night for the `ShareLink`; nil until it is written or when writing failed.
+    @State private var exportURL: URL? = nil
 
     var body: some View {
         let stats = session.statistics()
@@ -25,6 +27,23 @@ struct NightDetailView: View {
         .background(Theme.background)
         .navigationTitle(Formatters.nightDate(session.startDate))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if let url = exportURL {
+                    ShareLink(item: url) {
+                        Label("Exportieren", systemImage: "square.and.arrow.up")
+                    }
+                } else {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        // `MainActor.run` keeps the SwiftData reads on the main actor whichever isolation
+        // the `task` closure gets.
+        .task {
+            await MainActor.run { refreshExport() }
+        }
         // Leaving the night (back or another tab) ends playback, so a clip never keeps
         // playing into a night started meanwhile (spec B1).
         .onDisappear {
@@ -113,9 +132,24 @@ struct NightDetailView: View {
         }
         do {
             try dependencies.repository.deleteEvent(event)
+            refreshExport()
         } catch {
             deleteErrorMessage = "Das Ereignis konnte nicht gelöscht werden: \(error.localizedDescription)"
         }
+    }
+
+    /// Writes the CSV of the night to a temporary file and publishes its URL for the share
+    /// button. A failure leaves no URL (the toolbar keeps its inactive icon), so a stale
+    /// file is never offered.
+    private func refreshExport() {
+        let csv = CSVExporter.makeCSV(
+            events: NightDetailView.exportEvents(session.events),
+            epochs: NightDetailView.exportEpochs(session.epochs)
+        )
+        exportURL = try? CSVExporter.writeTemporaryFile(
+            csv: csv,
+            fileName: CSVExporter.fileName(for: session.startDate)
+        )
     }
 
     /// `session.events` is unordered. Events that start together (two types detected in
@@ -127,6 +161,35 @@ struct NightDetailView: View {
             }
             return lhs.typeRaw < rhs.typeRaw
         }
+    }
+
+    /// Export rows in chronological order (the exporter sorts again).
+    private static func exportEvents(_ events: [SoundEvent]) -> [EventExportRow] {
+        chronological(events).map { event in
+            EventExportRow(
+                type: event.type,
+                start: event.startDate,
+                end: event.endDate,
+                maxConfidence: event.maxConfidence,
+                averageConfidence: event.averageConfidence,
+                clipRelativePath: event.clipRelativePath
+            )
+        }
+    }
+
+    /// `session.epochs` is unordered; the rows are sorted by timestamp (the exporter sorts again).
+    private static func exportEpochs(_ epochs: [EpochSample]) -> [EpochExportRow] {
+        epochs
+            .sorted { $0.timestamp < $1.timestamp }
+            .map { epoch in
+                EpochExportRow(
+                    timestamp: epoch.timestamp,
+                    motionIntensity: epoch.motionIntensity,
+                    isRestless: epoch.isRestless,
+                    averageDecibels: epoch.averageDecibels,
+                    peakDecibels: epoch.peakDecibels
+                )
+            }
     }
 
     /// `session.epochs` is unordered. Levels below the chart floor are drawn on it, so a
