@@ -261,7 +261,9 @@ Standard-Schutzklasse für App-Dateien auf iOS ist bereits
 `completeUntilFirstUserAuthentication`. Trotzdem setzt `FileStore` das Attribut
 explizit auf dem Clip-Verzeichnis, jedem Clip und auf dem Store-Verzeichnis und
 der Store-Datei nach dem Anlegen. Der SwiftData-Store liegt per
-`ModelConfiguration(url:)` in `Application Support/Store/SleepTracker.store`.
+`ModelConfiguration(url:)` in `Application Support/SleepTracker/Store/SleepTracker.store`.
+Die Clips liegen entsprechend unter `Application Support/SleepTracker/Clips/<session-id>/`
+(alle App-Dateien unter dem gemeinsamen Ordner `Application Support/SleepTracker/`).
 
 ### B11. Einstellungen
 `AppSettings` ist ein Codable-Struct mit allen einstellbaren Werten und
