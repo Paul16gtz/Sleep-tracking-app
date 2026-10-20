@@ -17,6 +17,9 @@ protocol AudioPipelineDelegate: AnyObject {
     func pipeline(_ pipeline: AudioPipeline, didFinalizeEvent event: DetectedEvent, clipRelativePath: String?)
     /// Raw top labels of one classifier window for the Debug screen; `time` is the window end.
     func pipeline(_ pipeline: AudioPipeline, didProduceTopLabels labels: [RankedLabel], at time: TimeInterval)
+    /// Capture was interrupted: a gap opened at `start` (seconds since session start).
+    /// `didRecordGap` follows once it closes.
+    func pipeline(_ pipeline: AudioPipeline, didBeginGapAt start: TimeInterval)
     /// An interruption gap was closed: capture resumed, or the session ended during the gap.
     func pipeline(_ pipeline: AudioPipeline, didRecordGap gap: InterruptionGap)
     /// A message for the user (German).
@@ -238,8 +241,19 @@ final class AudioPipeline: AudioSourceDelegate, SoundClassifierDelegate {
         // One open gap at a time; a further report before capture resumes adds nothing.
         if !hasOpenGap {
             gaps.append(InterruptionGap(start: lastBufferEnd, end: nil, reason: reason.rawValue))
+            delegate?.pipeline(self, didBeginGapAt: lastBufferEnd)
         }
         completeClassifier()
+        // Nothing is heard during the gap, so no event and no clip may span it: active and
+        // pending events end at their last hit and are finalized now, and the open clip is
+        // closed (it would stay unplayable for as long as the outage lasts). The detector
+        // stays; every type is idle afterwards.
+        if let outputs = detector?.finish(at: lastBufferEnd) {
+            handle(outputs)
+        }
+        if let actions = recorder?.finish() {
+            perform(actions)
+        }
     }
 
     func audioSource(_ source: AudioSource, didFailWith error: Error) {

@@ -29,27 +29,11 @@ final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObservi
     private let classifyRequest: SNClassifySoundRequest
     private let analyzer: SNAudioStreamAnalyzer
 
-    /// The window duration in seconds that SoundAnalysis actually uses, for the
-    /// Debug screen (normally `windowDuration`).
-    var effectiveWindowDuration: TimeInterval {
-        classifyRequest.windowDuration.seconds
-    }
-
     /// `format` is the format of every buffer passed to `analyze` (mono Float32 at
     /// the native sample rate). Throws when the built-in classifier is unavailable
     /// or the analyzer rejects the request.
     init(format: AVAudioFormat, mapping: LabelMapping, timeOffset: TimeInterval) throws {
-        let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
-        // Assigning a duration that `windowDurationConstraint` does not allow is not
-        // reported as a Swift error (no do/catch possible). If the constraint lists
-        // discrete durations, the one closest to 1.5 s is used; otherwise 1.5 s is set
-        // directly.
-        let preferred = CMTime(seconds: SoundClassifierService.windowDuration, preferredTimescale: 48_000)
-        request.windowDuration = SoundClassifierService.allowedWindowDuration(
-            closestTo: preferred,
-            constraint: request.windowDurationConstraint
-        )
-        request.overlapFactor = SoundClassifierService.overlapFactor
+        let request = try SoundClassifierService.makeRequest()
         self.classifyRequest = request
         self.analyzer = SNAudioStreamAnalyzer(format: format)
         self.mapping = mapping
@@ -61,6 +45,27 @@ final class SoundClassifierService: NSObject, SoundClassifying, SNResultsObservi
     /// The label set of the built-in classifier, for the label mapping and the Debug screen.
     static func knownLabels() throws -> [String] {
         try SNClassifySoundRequest(classifierIdentifier: .version1).knownClassifications
+    }
+
+    /// The window duration in seconds that SoundAnalysis accepts for the request every
+    /// segment uses, for the Debug screen (normally `windowDuration`).
+    static func effectiveWindowDuration() throws -> TimeInterval {
+        try makeRequest().windowDuration.seconds
+    }
+
+    /// The request for the built-in classifier with the preferred window and overlap.
+    /// Assigning a duration that `windowDurationConstraint` does not allow is not reported
+    /// as a Swift error (no do/catch possible). If the constraint lists discrete
+    /// durations, the one closest to 1.5 s is used; otherwise 1.5 s is set directly.
+    private static func makeRequest() throws -> SNClassifySoundRequest {
+        let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
+        let preferred = CMTime(seconds: SoundClassifierService.windowDuration, preferredTimescale: 48_000)
+        request.windowDuration = SoundClassifierService.allowedWindowDuration(
+            closestTo: preferred,
+            constraint: request.windowDurationConstraint
+        )
+        request.overlapFactor = SoundClassifierService.overlapFactor
+        return request
     }
 
     /// Factory for the pipeline: one service per stream segment. `mapping` is a value

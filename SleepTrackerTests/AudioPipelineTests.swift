@@ -147,6 +147,7 @@ final class AudioPipelineTests: XCTestCase {
         harness.source.emitInterruption(.systemInterruption)
 
         XCTAssertEqual(harness.pipeline.gaps, [InterruptionGap(start: 10, end: nil, reason: "systemInterruption")])
+        XCTAssertEqual(harness.spy.gapStarts, [10])
         XCTAssertTrue(harness.spy.gaps.isEmpty)
         XCTAssertEqual(harness.classifier.completeCount, 1)
 
@@ -163,6 +164,58 @@ final class AudioPipelineTests: XCTestCase {
         XCTAssertTrue(harness.spy.epochs.isEmpty)
         harness.pushBuffers(1)
         XCTAssertEqual(harness.spy.epochs.map(\.index), [0])
+    }
+
+    func testInterruptionSeparatesEventsAcrossTheGap() throws {
+        let harness = try makeHarness()
+        harness.beginSegment(at: 0)
+        harness.pushBuffers(3)       // the last buffer ends at 3 s
+
+        // Speech 0 ... 2.25 s, confirmed by the second window; its clip opens with the
+        // 300 buffered samples as pre-roll (725 requested).
+        harness.emit(w(0, [.speech: 0.9]))
+        harness.emit(w(0.75, [.speech: 0.9]))
+        XCTAssertEqual(harness.clipWriter.openedTypes, [.speech])
+        XCTAssertEqual(harness.clipWriter.writtenSampleCount, 300)
+
+        harness.source.emitInterruption(.systemInterruption)
+
+        // The gap opens at the last buffer end. The event ends at its last hit and is final
+        // at once, with its clip, and the clip is closed without waiting for the outage.
+        XCTAssertEqual(harness.spy.gapStarts, [3])
+        XCTAssertEqual(harness.spy.finalizedEvents.count, 1)
+        let first = try XCTUnwrap(harness.spy.finalizedEvents.first)
+        XCTAssertEqual(first.event.type, .speech)
+        XCTAssertEqual(first.event.start, 0)
+        XCTAssertEqual(first.event.end, 2.25)
+        XCTAssertEqual(first.clipRelativePath, clipPath)
+        XCTAssertEqual(harness.clipWriter.closeCount, 1)
+
+        // Capture resumes at 20 s with speech right away: a new event, not the old one
+        // stretched over the gap.
+        harness.beginSegment(at: 20)
+        harness.pushBuffers(3)       // buffers end at 21, 22 and 23 s
+        harness.emit(w(20, [.speech: 0.9]))
+        harness.emit(w(20.75, [.speech: 0.9]))
+        harness.clock.now = 30
+        harness.pipeline.stop()
+
+        XCTAssertEqual(
+            harness.spy.startedEvents,
+            [
+                PipelineSpy.StartedEvent(type: .speech, start: 0),
+                PipelineSpy.StartedEvent(type: .speech, start: 20)
+            ]
+        )
+        let finalized = harness.spy.finalizedEvents
+        XCTAssertEqual(finalized.map(\.event.type), [.speech, .speech])
+        XCTAssertEqual(finalized.map(\.event.start), [0, 20])
+        XCTAssertEqual(finalized.map(\.event.end), [2.25, 22.25])
+        XCTAssertEqual(finalized.map(\.clipRelativePath), [clipPath, clipPath])
+        XCTAssertEqual(harness.clipWriter.openedTypes, [.speech, .speech])
+        XCTAssertEqual(harness.clipWriter.closeCount, 2)
+        XCTAssertEqual(harness.spy.gaps, [InterruptionGap(start: 3, end: 20, reason: "systemInterruption")])
+        XCTAssertEqual(harness.spy.gapStarts, [3])
     }
 
     func testFallAsleepDelaySuppressesEvents() throws {
@@ -277,6 +330,7 @@ private final class PipelineSpy: AudioPipelineDelegate {
     private(set) var startedEvents: [StartedEvent] = []
     private(set) var finalizedEvents: [FinalizedEvent] = []
     private(set) var topLabels: [TopLabels] = []
+    private(set) var gapStarts: [TimeInterval] = []
     private(set) var gaps: [InterruptionGap] = []
     private(set) var errors: [String] = []
     private(set) var didFinish = false
@@ -299,6 +353,10 @@ private final class PipelineSpy: AudioPipelineDelegate {
 
     func pipeline(_ pipeline: AudioPipeline, didProduceTopLabels labels: [RankedLabel], at time: TimeInterval) {
         topLabels.append(TopLabels(labels: labels, time: time))
+    }
+
+    func pipeline(_ pipeline: AudioPipeline, didBeginGapAt start: TimeInterval) {
+        gapStarts.append(start)
     }
 
     func pipeline(_ pipeline: AudioPipeline, didRecordGap gap: InterruptionGap) {

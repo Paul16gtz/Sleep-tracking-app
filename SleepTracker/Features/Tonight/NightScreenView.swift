@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Dimmed screen shown while a night is recorded: elapsed time, live level, counters
-/// for snoring and speech and the stop button. Calm on purpose: no own animations.
+/// for snoring and speech and the stop button, and a notice while capture is interrupted.
+/// Calm on purpose: no own animations.
 struct NightScreenView: View {
     @EnvironmentObject private var controller: SleepSessionController
 
@@ -9,6 +10,8 @@ struct NightScreenView: View {
     private static let dimmed = Color.white.opacity(0.6)
     /// The clock is a little brighter than the rest.
     private static let clockColor = Color.white.opacity(0.8)
+    /// The interruption notice stands out from the rest, but stays dimmed for the night.
+    private static let noticeColor = Color.orange.opacity(0.8)
 
     var body: some View {
         ZStack {
@@ -17,6 +20,9 @@ struct NightScreenView: View {
             VStack(spacing: 40) {
                 Spacer()
                 clock
+                if controller.isCaptureInterrupted {
+                    interruptionNotice
+                }
                 levelView
                 countersRow
                 Spacer()
@@ -44,6 +50,15 @@ struct NightScreenView: View {
                     .foregroundStyle(NightScreenView.dimmed)
             }
         }
+    }
+
+    /// While capture is interrupted the clock keeps running but nothing is recorded, and
+    /// the live level stands still; the notice says so.
+    private var interruptionNotice: some View {
+        Label("Aufnahme unterbrochen – wird fortgesetzt, sobald möglich", systemImage: "mic.slash")
+            .font(.headline)
+            .multilineTextAlignment(.center)
+            .foregroundStyle(NightScreenView.noticeColor)
     }
 
     private var levelView: some View {

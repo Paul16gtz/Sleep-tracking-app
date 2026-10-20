@@ -7,12 +7,16 @@ enum MicrophoneError: LocalizedError {
     /// The engine could not be restarted after an interruption, not even after all retries.
     case restartFailed(Error)
 
+    /// The text of `restartFailed`. The pipeline reports errors as text, so the session
+    /// controller recognizes this one by it and withdraws it once capture resumes.
+    static let restartFailedMessage = "Aufnahme konnte nach einer Unterbrechung nicht fortgesetzt werden."
+
     var errorDescription: String? {
         switch self {
         case .noInputFormat:
             return "Kein Mikrofon-Eingang verfügbar."
         case .restartFailed:
-            return "Aufnahme konnte nach einer Unterbrechung nicht fortgesetzt werden."
+            return MicrophoneError.restartFailedMessage
         }
     }
 }
@@ -31,9 +35,12 @@ enum MicrophoneError: LocalizedError {
 /// Restart: at the end of an interruption (with or without `.shouldResume`), on a
 /// relevant route change, a media services reset or an engine configuration change, the
 /// interruption is reported once, the engine is torn down, the session is reconfigured
-/// and a new segment begins. A failed restart is retried after 1, 2, 5, 10 and 30 s;
-/// when the last retry fails, `didFailWith` reports `MicrophoneError.restartFailed`. The
-/// observers stay registered, so a later notification can still bring capture back.
+/// and a new segment begins. The same happens when capture is down although nothing will
+/// bring it back by itself: on a stale `.began` that only reports a suspension of the app,
+/// and when the app becomes active (for example the iPhone is unlocked) while no engine
+/// runs. A failed restart is retried after 1, 2, 5, 10 and 30 s; when the last retry
+/// fails, `didFailWith` reports `MicrophoneError.restartFailed`. The observers stay
+/// registered, so a later notification can still bring capture back.
 ///
 /// While retries are pending the app neither records nor plays, so iOS may suspend it
 /// and the retry timers would not fire. A background task assertion keeps it running
@@ -59,7 +66,7 @@ final class MicrophoneAudioSource: AudioSource {
     private var retiredEngine: AVAudioEngine?
     /// `true` between `start()` and `stop()`.
     private var isRunning = false
-    /// `true` between an interruption's `.began` and its `.ended`.
+    /// `true` between an interruption's `.began` and its `.ended` (or the app becoming active).
     private var isSystemInterrupted = false
     /// `true` once the current outage has been reported; reset when a segment begins.
     private var interruptionReported = false
@@ -337,6 +344,9 @@ final class MicrophoneAudioSource: AudioSource {
             },
             center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
                 self?.handleMediaServicesReset()
+            },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.handleDidBecomeActive()
             }
         ]
     }
@@ -357,6 +367,17 @@ final class MicrophoneAudioSource: AudioSource {
         }
         switch type {
         case .began:
+            if MicrophoneAudioSource.isSuspensionReport(userInfo) {
+                // Sent when the app resumes after it was suspended with an active session
+                // (for example after a failed restart chain). No other app took the session
+                // and no `.ended` follows, so capture restarts now instead of waiting; a new
+                // attempt replaces pending retries. An interruption that is still open keeps
+                // waiting for its `.ended` or for the app to become active.
+                if engine?.isRunning != true {
+                    restart(reason: .systemInterruption)
+                }
+                return
+            }
             // The system has already stopped the engine. Pending retries would only
             // fail while the interruption lasts, so they and their assertion end here.
             isSystemInterrupted = true
@@ -373,6 +394,17 @@ final class MicrophoneAudioSource: AudioSource {
         @unknown default:
             break
         }
+    }
+
+    /// `true` for a `.began` that only reports that the app was suspended with an active
+    /// session. The reason is deprecated since iOS 16, which is not expected to send it any
+    /// more; the restart when the app becomes active covers that case as well.
+    private static func isSuspensionReport(_ userInfo: [AnyHashable: Any]) -> Bool {
+        guard let reasonValue = userInfo[AVAudioSessionInterruptionReasonKey] as? UInt,
+              let reason = AVAudioSession.InterruptionReason(rawValue: reasonValue) else {
+            return false
+        }
+        return reason == .appWasSuspended
     }
 
     private func handleRouteChange(_ notification: Notification) {
@@ -398,6 +430,19 @@ final class MicrophoneAudioSource: AudioSource {
         // and reconfigures the session. A pending interruption is void as well.
         isSystemInterrupted = false
         restart(reason: .mediaServicesReset)
+    }
+
+    /// The app became active, for example because the iPhone was unlocked with the app in
+    /// front. Capture that is not running then has nothing left to bring it back: an
+    /// interruption whose `.ended` never came, or a restart chain that gave up. The
+    /// interruption is treated as over; if another app still holds the session, the
+    /// activation fails and the retry chain takes over.
+    private func handleDidBecomeActive() {
+        guard isRunning, engine?.isRunning != true else {
+            return
+        }
+        isSystemInterrupted = false
+        restart(reason: .systemInterruption)
     }
 
     private func handleConfigurationChange(_ notification: Notification) {

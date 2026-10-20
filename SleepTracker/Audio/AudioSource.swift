@@ -7,7 +7,6 @@ enum AudioInterruptionReason: String, Codable {
     case routeChange
     case mediaServicesReset
     case engineConfigurationChange
-    case engineFailure
 
     /// German display name shown in the UI.
     var germanName: String {
@@ -16,7 +15,6 @@ enum AudioInterruptionReason: String, Codable {
         case .routeChange: return "Audio-Gerät gewechselt"
         case .mediaServicesReset: return "Audiodienste neu gestartet"
         case .engineConfigurationChange: return "Audio-Konfiguration geändert"
-        case .engineFailure: return "Audio-Fehler"
         }
     }
 }

@@ -92,6 +92,8 @@ final class SleepSessionController: ObservableObject {
     @Published private(set) var motionBaseline: Double? = nil
     /// `true` while the running night records motion.
     @Published private(set) var isMotionActive: Bool = false
+    /// `true` while audio capture of the running session is interrupted (a gap is open).
+    @Published private(set) var isCaptureInterrupted: Bool = false
     /// Message for an alert (German); nil means no error. Views set it to nil to dismiss.
     @Published var errorMessage: String? = nil
 
@@ -150,6 +152,9 @@ final class SleepSessionController: ObservableObject {
     private var isStarting = false
     /// Gaps of the running session closed so far, in the order they were reported.
     private var gaps: [InterruptionGap] = []
+    /// `true` while `errorMessage` shows the restart failure of the running session, which
+    /// is withdrawn when capture resumes after all.
+    private var showsRestartFailure = false
     private var fallAsleepDelay: TimeInterval = 0
     private var lastTopLabelsUpdate: Date?
     private var tickTimer: Timer?
@@ -191,7 +196,9 @@ final class SleepSessionController: ObservableObject {
     /// only `errorMessage` is set and the night records sound without motion. The test
     /// mode (spec B8) reads the file at `fileURL` without asking for the microphone,
     /// counts events from its first second (fall-asleep delay 0), records no motion and
-    /// stores a session marked `isTest`; it stops by itself at the end of the file.
+    /// stores a session marked `isTest`; it stops by itself at the end of the file. When
+    /// the classifier knows no label for snoring or speech, `errorMessage` says so and the
+    /// session starts anyway.
     func start(mode: SessionMode) async throws {
         guard !isRunning, !isStarting else {
             throw ControllerError.alreadyRunning
@@ -223,6 +230,10 @@ final class SleepSessionController: ObservableObject {
             throw ControllerError.classifierUnavailable(error.localizedDescription)
         }
         let mapping = LabelMapping(knownLabels: labels)
+        // Without a label a type would never be detected, and nothing would say so.
+        if let warning = SleepSessionController.missingLabelWarning(for: mapping) {
+            errorMessage = warning
+        }
 
         var settings = settingsStore.settings
         if isTest {
@@ -373,6 +384,20 @@ final class SleepSessionController: ObservableObject {
         try? repository.save()
     }
 
+    /// The types the night screen counts; the classifier must know a label for each.
+    private static let requiredTypes: [SoundEventType] = [.snoring, .speech]
+
+    /// A German warning for every required type the classifier has no label for, or nil.
+    private static func missingLabelWarning(for mapping: LabelMapping) -> String? {
+        let sentences = requiredTypes
+            .filter { !mapping.availableTypes.contains($0) }
+            .map { type -> String in
+                let label = LabelMapping.candidates[type]?.first ?? type.rawValue
+                return "Der Klassifikator kennt das Label „\(label)“ nicht; \(type.germanName) wird nicht erkannt."
+            }
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    }
+
     /// Resets the published live values and the per-session bookkeeping. `isRunning`
     /// is set by the caller; `errorMessage` stays until a view dismisses it.
     private func resetLiveState() {
@@ -386,6 +411,8 @@ final class SleepSessionController: ObservableObject {
         liveMotionMagnitude = 0
         motionBaseline = nil
         isMotionActive = false
+        isCaptureInterrupted = false
+        showsRestartFailure = false
         gaps = []
         fallAsleepDelay = 0
         lastTopLabelsUpdate = nil
@@ -590,11 +617,24 @@ final class SleepSessionController: ObservableObject {
         topLabels = labels
     }
 
+    private func handleGapBegin(from pipeline: AudioPipeline) {
+        guard isCurrent(pipeline) else {
+            return
+        }
+        isCaptureInterrupted = true
+    }
+
     private func handleGap(_ gap: InterruptionGap, from pipeline: AudioPipeline) {
         // A gap reported while stopping is already in the final list that `stop()` stored.
         guard isCurrent(pipeline), let session = current?.session else {
             return
         }
+        // Capture resumed, so a restart failure reported during the gap no longer holds.
+        isCaptureInterrupted = false
+        if showsRestartFailure, errorMessage == MicrophoneError.restartFailedMessage {
+            errorMessage = nil
+        }
+        showsRestartFailure = false
         gaps.append(gap)
         do {
             try repository.updateGaps(gaps, for: session)
@@ -608,6 +648,7 @@ final class SleepSessionController: ObservableObject {
             return
         }
         errorMessage = message
+        showsRestartFailure = isCurrent(pipeline) && message == MicrophoneError.restartFailedMessage
     }
 
     private func handlePipelineFinished(_ pipeline: AudioPipeline) {
@@ -672,6 +713,12 @@ extension SleepSessionController: AudioPipelineDelegate {
     nonisolated func pipeline(_ pipeline: AudioPipeline, didProduceTopLabels labels: [RankedLabel], at time: TimeInterval) {
         DispatchQueue.main.async { [weak self] in
             self?.handleTopLabels(labels, at: time, from: pipeline)
+        }
+    }
+
+    nonisolated func pipeline(_ pipeline: AudioPipeline, didBeginGapAt start: TimeInterval) {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleGapBegin(from: pipeline)
         }
     }
 

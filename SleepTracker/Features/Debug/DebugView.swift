@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Debug area (spec A9), reached from the settings: the live top 5 of the classifier, the
-/// live motion values, the entry to the test mode and the classifier's label set with the
-/// labels the app maps to its categories. The long label list comes last, so the live
-/// values are visible without scrolling.
+/// live motion values, the entry to the test mode, the classifier's window length and its
+/// label set with the labels the app maps to its categories. The long label list comes
+/// last, so the live values are visible without scrolling.
 struct DebugView: View {
     @EnvironmentObject private var sessionController: SleepSessionController
 
@@ -16,12 +16,16 @@ struct DebugView: View {
     }
 
     @State private var labelsState: LabelsState = .loading
+    /// The window length SoundAnalysis accepted, in seconds; nil while loading or when
+    /// the classifier is unavailable.
+    @State private var windowDuration: TimeInterval? = nil
 
     var body: some View {
         Form {
             liveClassificationSection
             motionSection
             testModeSection
+            classifierSection
             labelsSection
         }
         .scrollContentBackground(.hidden)
@@ -31,7 +35,11 @@ struct DebugView: View {
         // the main actor whichever isolation the `task` closure gets.
         .task {
             let result = Result { try SoundClassifierService.knownLabels() }
-            await MainActor.run { applyLabels(result) }
+            let duration = try? SoundClassifierService.effectiveWindowDuration()
+            await MainActor.run {
+                applyLabels(result)
+                windowDuration = duration
+            }
         }
     }
 
@@ -88,6 +96,14 @@ struct DebugView: View {
                 TestModeView()
             }
             .listRowBackground(Theme.card)
+        }
+    }
+
+    /// The window length SoundAnalysis accepted (spec A3 asks to document the one in use).
+    private var classifierSection: some View {
+        Section("Klassifikator") {
+            LabeledContent("Fensterlänge", value: windowDurationText)
+                .listRowBackground(Theme.card)
         }
     }
 
@@ -166,6 +182,15 @@ struct DebugView: View {
         return "Verfügbare Labels"
     }
 
+    /// "1,5 s" once read; "–" while loading or without a classifier.
+    private var windowDurationText: String {
+        guard let duration = windowDuration else {
+            return "–"
+        }
+        let number = DebugView.secondsFormatter.string(from: NSNumber(value: duration)) ?? String(format: "%.3f", duration)
+        return number + " s"
+    }
+
     /// The resting level once calibrated; while calibrating "Kalibrierung läuft", without motion "–".
     private var baselineText: String {
         if let baseline = sessionController.motionBaseline {
@@ -186,6 +211,16 @@ struct DebugView: View {
     private static func decimalText(_ value: Double) -> String {
         String(format: "%.3f", value)
     }
+
+    /// Seconds with a German decimal comma and one to three decimals ("1,5").
+    private static let secondsFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 1
+        formatter.maximumFractionDigits = 3
+        return formatter
+    }()
 
     private func applyLabels(_ result: Result<[String], Error>) {
         switch result {
